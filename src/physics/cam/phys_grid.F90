@@ -533,7 +533,6 @@ end subroutine phys_grid_readnl
     nullify(lat_coord)
     nullify(lon_coord)
 
-    call t_adj_detailf(-2)
     call t_startf("phys_grid_init")
 
     !-----------------------------------------------------------------------
@@ -1216,7 +1215,6 @@ end subroutine phys_grid_readnl
     physgrid_set = .true.   ! Set flag indicating physics grid is now set
     !
     call t_stopf("phys_grid_init")
-    call t_adj_detailf(+2)
     return
   end subroutine phys_grid_init
 

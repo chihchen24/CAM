@@ -121,9 +121,9 @@ OPTIONS
                           test_tracers, test_tracers2].
                         Default: none.
      -chem <name>       Build CAM with specified prognostic chemistry package
-                        [ trop_mam3 | trop_mam4 | trop_mam7 | trop_mozart | trop_strat_mam4_vbs | trop_strat_mam4_vbsext | 
-                          waccm_ma | waccm_mad | waccm_mad_mam4 | waccm_ma_mam4 | 
-                          waccm_ma_sulfur | waccm_sc | waccm_sc_mam4 | waccm_tsmlt_mam4 | 
+                        [ trop_mam3 | trop_mam4 | trop_mam7 | trop_mozart | trop_strat_mam4_vbs | trop_strat_mam4_vbsext |
+                          waccm_ma | waccm_mad | waccm_mad_mam4 | waccm_ma_mam4 |
+                          waccm_ma_sulfur | waccm_sc | waccm_sc_mam4 | waccm_tsmlt_mam4 |
                           terminator | none ].
                         Default: trop_mam4 for cam6 and trop_mam3 for cam5.
      -[no]clubb_sgs     Switch on [off] CLUBB_SGS.  Default: on for cam6, otherwise off.
@@ -160,7 +160,7 @@ OPTIONS
                         Currently available: DST,SSLT,SO4,GHG,OC,BC,CARBON16
      -psubcols <n>      Maximum number of sub-columns in a run - set to 1 if not using sub-columns (default)
      -rad <name>        Specify the radiation package [rrtmg | camrt]
-     -silhs             Switch on SILHS. 
+     -silhs             Switch on SILHS.
      -spcam_clubb_sgs   Turn on the SPCAM version of CLUBB
      -spcam_nx <n>      SPCAM x-grid. - defaults to 4 (note the CRM requires spcam_nx to be greater than or equal to 4)
      -spcam_ny <n>      SPCAM y-grid. - defaults to 1
@@ -197,6 +197,7 @@ OPTIONS
      -test              Switch on testing of Fortran compiler and external libraries.
      -verbose [or -v]   Turn on verbose echoing of settings made by configure.
      -version           Echo the CVS tag name used to check out this CAM distribution.
+     -weak_scale_fix    Temporary switch to use the new physics grid with weak scaling fix.
 
   Options for surface components used in standalone CAM mode:
 
@@ -224,7 +225,7 @@ OPTIONS
                         by the wrapper script.  Default: pgi
      -fflags <string>   A string of user specified Fortran compiler flags.  Appended to
                         Makefile defaults.  See -fopt to override optimization flags.
-     -fopt <string>     A string of user specified Fortran compiler optimization flags.
+n     -fopt <string>     A string of user specified Fortran compiler optimization flags.
                         Overrides Makefile defaults.
      -gmake <name>      Name of the GNU make program on your system.  Supply the absolute
                         pathname if the program is not in your path (or fix your path).
@@ -372,6 +373,7 @@ GetOptions(
     "version"                   => \$opts{'version'},
     "waccm_phys"                => \$opts{'waccm_phys'},
     "waccmx"                    => \$opts{'waccmx'},
+    "weak_scale_fix"            => \$opts{'weak_scale_fix'},
     "zmconv_org"                => \$opts{'zmconv_org'},
 )  or usage();
 
@@ -969,7 +971,7 @@ if (defined $opts{'silhs'}) {
     $silhs = $opts{'silhs'};
 }
 
-# SILHS only works with CLUBB_SGS 
+# SILHS only works with CLUBB_SGS
 if ($silhs and not ($clubb_sgs )) {
     die <<"EOF";
 **    ERROR: SILHS is turned on, but CLUBB_SGS is not
@@ -1310,6 +1312,14 @@ my $hgrid = $cfg_ref->get('hgrid');
 set_horiz_grid("$cfgdir/$horiz_grid_file", $cfg_ref);
 
 if ($print>=2) { print "Horizontal grid specifier: $hgrid$eol"; }
+
+#-----------------------------------------------------------------------------------------------
+# Use Weak Scaling fix for physics grid?
+my $weak_scale_fix_opt = (defined $opts{'weak_scale_fix'}) ? 1 : 0;
+$cfg_ref->set('weak_scale_fix', $weak_scale_fix_opt);
+my $weak_scale_fix = $weak_scale_fix_opt ? 'ON': 'OFF';
+
+if ($print>=2) { print "weak_scale_fix: $weak_scale_fix$eol"; }
 
 #-----------------------------------------------------------------------------------------------
 # Maximum number of columns in a chunk.
@@ -1969,7 +1979,7 @@ if ($cfg_ref->get('analytic_ic')) {
 
 #WACCM-X extended thermosphere/ionosphere model
 if ($waccmx) {
-    $cfg_cppdefs .= ' -DWACCMX_PHYS'; 
+    $cfg_cppdefs .= ' -DWACCMX_PHYS';
     if (($dyn_pkg ne 'fv') and ($ionos ne 'none'))  {
         die "ERROR:  Ionosphere is only available for FV dycore \n";
     }
@@ -2814,6 +2824,11 @@ sub write_filepath
       print $fh "$camsrcdir/src/atmos_phys/kessler\n";
     }
 
+    # Weak scaling fix. This has to come before physics/cam and before dycores
+    if ($weak_scale_fix_opt) {
+      print $fh "$camsrcdir/src/physics/weak_scaling\n";
+    }
+
     if ($carma ne 'none') {
         # This directory needs to precede physics/cam/ to replace
         # the CARMA stub package with CARMA. Putting it first allows
@@ -2901,6 +2916,9 @@ sub write_filepath
     # Dynamics package and test utilities
     print $fh "$camsrcdir/src/dynamics/$dyn\n";
     if($dyn eq 'se') {
+        if ($weak_scale_fix_opt) {
+            print $fh "$camsrcdir/src/physics/weak_scaling/se\n";
+        }
        print $fh "$camsrcdir/src/dynamics/se/dycore\n";
     }
     print $fh "$camsrcdir/src/dynamics/tests\n";
