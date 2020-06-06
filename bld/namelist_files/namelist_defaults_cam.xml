@@ -2370,6 +2370,8 @@
 
 <!-- physics loadbalance -->
 <phys_loadbalance dyn="eul"> 3 </phys_loadbalance>
+<!-- physics global data -->
+<phys_global_max_fields>-1</phys_global_max_fields>
 
 <!-- Control output to history file(s) -->
 <history_amwg>                 .true.   </history_amwg>

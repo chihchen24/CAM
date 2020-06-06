@@ -1,0 +1,843 @@
+module phys_grid
+
+   use shr_kind_mod,        only: r8 => shr_kind_r8
+   use physics_column_type, only: physics_column_t
+   use perf_mod,            only: t_adj_detailf, t_startf, t_stopf
+
+   implicit none
+   private
+   save
+
+   ! Physics grid management
+   public :: phys_grid_init     ! initialize the physics grid
+   public :: phys_grid_readnl   ! Read the phys_grid_nl namelist
+   ! Local task interfaces
+   public :: get_dlat_p         ! latitude of a physics column in degrees
+   public :: get_dlon_p         ! longitude of a physics column in degrees
+   public :: get_rlat_p         ! latitude of a physics column in radians
+   public :: get_rlon_p         ! longitude of a physics column in radians
+   public :: get_area_p         ! area of a physics column in radians squared
+   public :: get_rlat_all_p     ! latitudes of physics cols in chunk (radians)
+   public :: get_rlon_all_p     ! longitudes of physics cols in chunk (radians)
+   public :: get_ncols_p        ! number of columns in a chunk
+   public :: get_gcol_p         ! global column index of a physics column
+   public :: local_index_p      ! local chunk index of a physics column
+   public :: get_grid_dims      ! return grid dimensions
+   ! Physics-dynamics coupling
+   public :: phys_decomp_to_dyn ! Transfer physics data to dynamics decomp
+   public :: dyn_decomp_to_phys ! Transfer dynamics data to physics decomp
+   ! Support for global sums
+   public :: init_col_assem_p   ! Setup communication patterns
+   public :: weighted_sum_p     ! Compute a weighted sum of a field
+   public :: weighted_field_p   ! Create a flat, weighted version of a field
+
+   ! The identifier for the physics grid
+   integer, parameter, public          :: phys_decomp = 100
+
+   ! dynamics field grid information
+   ! hdim1_d and hdim2_d are dimensions of rectangular horizontal grid
+   ! data structure, If 1D data structure, then hdim2_d == 1.
+   integer                             :: hdim1_d, hdim2_d
+   ! Dycore name and properties
+   character(len=8), protected, public :: dycore_name = ''
+
+   ! Physics decomposition information
+   type(physics_column_t), pointer     :: phys_columns(:) => NULL()
+
+   ! Physics chunking (thread blocking) data
+   ! Note that chunks cover local data
+   type, public :: chunk
+      integer, private :: ncols          =  1  ! # of grid columns in this chunk
+      integer, private :: chunk_index    = -1  ! Local index of this chunk
+      integer, private :: phys_col_start =  0  ! First physics column in chunk
+      integer, private :: phys_col_end   = -1  ! Last physics column in chunk
+   end type chunk
+
+   integer,     private          :: begchunk = 0
+   integer,     private          :: endchunk = -1
+   type(chunk), private, pointer :: chunks(:) => NULL() ! (begchunk:endchunk)
+
+   ! Max number of double-precision fields on a task for global calculations
+   ! A value of -1 signifies no limit.
+   integer,     protected, public :: phys_global_max_fields = -1
+
+   ! These variables are last to provide a limited table to search
+
+   !> \section arg_table_physics_grid  Argument Table
+   !! \htmlinclude arg_table_physics_grid.html
+   !!
+   integer,          protected, public :: pver = 0
+   integer,          protected, public :: pverp = 0
+   integer,          protected, public :: num_global_phys_cols = 0
+   integer,          protected, public :: columns_on_task = 0
+   integer,          protected, public :: index_top_layer = 0
+   integer,          protected, public :: index_bottom_layer = 0
+   integer,          protected, public :: index_top_interface = 1
+   integer,          protected, public :: index_bottom_interface = 0
+   logical,          protected, public :: phys_grid_initialized = .false.
+
+!==============================================================================
+CONTAINS
+!==============================================================================
+
+   subroutine phys_grid_readnl(nlfile)
+      use namelist_utils,  only: find_group_name
+      use cam_logfile,     only: iulog
+      use spmd_utils,      only: mpicom, mstrid=>masterprocid, masterproc
+      use spmd_utils,      only: mpi_integer
+      use ppgrid,          only: pcols
+
+      character(len=*), intent(in) :: nlfile
+
+      ! Local variables
+      integer :: unitn, ierr
+      character(len=*), parameter :: sub = 'phys_grid_readnl'
+
+      integer :: phys_alltoall = -HUGE(1)
+      integer :: phys_loadbalance = -HUGE(1)
+      integer :: phys_twin_algorithm = -HUGE(1)
+      integer :: phys_chnk_per_thd = -HUGE(1)
+
+      namelist /phys_grid_nl/ phys_alltoall, phys_loadbalance,                &
+           phys_twin_algorithm, phys_chnk_per_thd, phys_global_max_fields
+      !------------------------------------------------------------------------
+
+      ! Read namelist
+      if (masterproc) then
+         open(newunit=unitn, file=trim(nlfile), status='old')
+         call find_group_name(unitn, 'phys_grid_nl', status=ierr)
+         if (ierr == 0) then
+            read(unitn, phys_grid_nl, iostat=ierr)
+            if (ierr /= 0) then
+               call endrun(sub//': FATAL: reading namelist')
+            end if
+         end if
+         close(unitn)
+      end if
+
+      call mpi_bcast(phys_alltoall, 1, mpi_integer, mstrid, mpicom, ierr)
+      call mpi_bcast(phys_loadbalance, 1, mpi_integer, mstrid, mpicom, ierr)
+      call mpi_bcast(phys_twin_algorithm, 1, mpi_integer, mstrid, mpicom, ierr)
+      call mpi_bcast(phys_chnk_per_thd, 1, mpi_integer, mstrid, mpicom, ierr)
+      call mpi_bcast(phys_global_max_fields, 1, mpi_integer, mstrid,          &
+           mpicom, ierr)
+
+      if (masterproc) then
+         write(iulog,*) 'PHYS_GRID options:'
+         write(iulog,*) '  Using PCOLS         =', pcols
+         write(iulog,*) '  Max global fields   =', phys_global_max_fields
+         write(iulog,*) '  phys_loadbalance    = (not used)'
+         write(iulog,*) '  phys_twin_algorithm = (not used)'
+         write(iulog,*) '  phys_alltoall       = (not used)'
+         write(iulog,*) '  chunks_per_thread   = (not used)'
+      end if
+
+   end subroutine phys_grid_readnl
+
+   subroutine phys_grid_init()
+!      use mpi,              only: MPI_reduce ! XXgoldyXX: Should this work?
+      use mpi,              only: MPI_INTEGER, MPI_MIN
+      use spmd_utils,       only: npes, mpicom
+      use ppgrid,           only: pcols
+      use dyn_grid,         only: get_dyn_grid_info, physgrid_copy_attributes_d
+      use cam_grid_support, only: cam_grid_register, cam_grid_attribute_register
+      use cam_grid_support, only: iMap, hclen => max_hcoordname_len
+      use cam_grid_support, only: horiz_coord_t, horiz_coord_create
+      use cam_grid_support, only: cam_grid_attribute_copy, cam_grid_attr_exists
+
+      ! Local variables
+      integer                             :: index
+      integer                             :: col_index
+      integer                             :: num_chunks
+      integer                             :: first_dyn_column, last_dyn_column
+      type(physics_column_t), pointer     :: dyn_columns(:) ! Dyn decomp
+      ! Maps and values for physics grid
+      real(r8),               pointer     :: lonvals(:)
+      real(r8),               pointer     :: latvals(:)
+      real(r8)                            :: lonmin, latmin
+      integer(iMap),          pointer     :: grid_map(:,:)
+      integer(iMap),          allocatable :: coord_map(:)
+      type(horiz_coord_t),    pointer     :: lat_coord
+      type(horiz_coord_t),    pointer     :: lon_coord
+      real(r8),               pointer     :: area_d(:)
+      logical                             :: unstructured
+      real(r8)                            :: temp ! For MPI
+      integer                             :: ierr ! For MPI
+      character(len=hclen),   pointer     :: copy_attributes(:)
+      character(len=hclen)                :: copy_gridname
+
+      nullify(dyn_columns)
+      nullify(lonvals)
+      nullify(latvals)
+      nullify(grid_map)
+      nullify(lat_coord)
+      nullify(lon_coord)
+      nullify(area_d)
+      nullify(copy_attributes)
+
+      call t_adj_detailf(-2)
+      call t_startf("phys_grid_init")
+
+      ! Gather info from the dycore
+      call get_dyn_grid_info(hdim1_d, hdim2_d, pver, dycore_name,             &
+           index_top_layer, index_bottom_layer, dyn_columns)
+      num_global_phys_cols = hdim1_d * hdim2_d
+      pverp = pver + 1
+      first_dyn_column = LBOUND(dyn_columns, 1)
+      last_dyn_column = UBOUND(dyn_columns, 1)
+      unstructured = hdim2_d <= 1
+      !!XXgoldyXX: Can we enforce interface numbering separate from dycore?
+      !!XXgoldyXX: This will work for both CAM and WRF/MPAS physics
+      !!XXgoldyXX: This only has a 50% chance of working on a single level model
+      if (index_top_layer < index_bottom_layer) then
+         index_top_interface = index_top_layer
+         index_bottom_interface = index_bottom_layer + 1
+      else
+         index_bottom_interface = index_bottom_layer
+         index_top_interface = index_top_layer + 1
+      end if
+
+      ! Set up the physics decomposition
+      columns_on_task = size(dyn_columns)
+      phys_columns => dyn_columns
+      if (columns_on_task > 0) then
+         col_index = last_dyn_column - first_dyn_column + 1
+         num_chunks = col_index / pcols
+         if ((num_chunks * pcols) < col_index) then
+            num_chunks = num_chunks + 1
+         end if
+         begchunk = 1
+         endchunk =begchunk + num_chunks - 1
+      end if
+      allocate(chunks(begchunk:endchunk))
+      col_index = first_dyn_column - 1
+      do index = begchunk, endchunk
+         chunks(index)%ncols = MIN(pcols, (last_dyn_column - col_index))
+         col_index = col_index + 1
+         chunks(index)%chunk_index = index
+         chunks(index)%phys_col_start =  col_index
+         col_index = col_index + chunks(index)%ncols - 1
+         chunks(index)%phys_col_end = col_index
+      end do
+
+      ! Now that we are done settine up the physics decomposition, clean up
+      ! Do not deallocate dyn_columns, the dycore will use this information
+      !    in dp_coupling
+      nullify(dyn_columns)
+
+      ! Add physics-package grid to set of CAM grids
+      ! physgrid always uses 'lat' and 'lon' as coordinate names; If dynamics
+      !    grid is different, it will use different coordinate names
+
+      ! First, create a map for the physics grid
+      ! It's structure will depend on whether or not the physics grid is
+      ! unstructured
+      if (unstructured) then
+         allocate(grid_map(3, columns_on_task))
+      else
+         allocate(grid_map(4, columns_on_task))
+      end if
+      grid_map = 0
+      allocate(latvals(size(grid_map, 2)))
+      allocate(lonvals(size(grid_map, 2)))
+
+      lonmin = 1000.0_r8 ! Out of longitude range
+      latmin = 1000.0_r8 ! Out of latitude range
+      do col_index = 1, columns_on_task
+         latvals(col_index) = phys_columns(col_index)%lat_deg
+         if (latvals(col_index) < latmin) then
+            latmin = latvals(col_index)
+         end if
+         lonvals(col_index) = phys_columns(col_index)%lon_deg
+         if (lonvals(col_index) < lonmin) then
+            lonmin = lonvals(col_index)
+         end if
+         grid_map(1, col_index) = col_index
+         grid_map(2, col_index) = 0 ! No chunking in physics anymore
+         if (unstructured) then
+            grid_map(3, col_index) = phys_columns(col_index)%global_col_num
+         else
+            ! lon
+            grid_map(3, col_index) = phys_columns(col_index)%coord_indices(1)
+            ! lat
+            grid_map(4, col_index) = phys_columns(col_index)%coord_indices(2)
+         end if
+      end do
+
+      ! Note that if the dycore is using the same points as the physics grid,
+      !      it will have already set up 'lat' and 'lon' axes for
+      !      the physics grid
+      !      However, these will be in the dynamics decomposition
+
+      if (unstructured) then
+         lon_coord => horiz_coord_create('lon', 'ncol', num_global_phys_cols, &
+              'longitude', 'degrees_east', 1, size(lonvals), lonvals,         &
+              map=grid_map(3,:))
+         lat_coord => horiz_coord_create('lat', 'ncol', num_global_phys_cols, &
+              'latitude', 'degrees_north', 1, size(latvals), latvals,         &
+              map=grid_map(3,:))
+      else
+         allocate(coord_map(size(grid_map, 2)))
+         ! We need a global minimum longitude and latitude
+         if (npes > 1) then
+            temp = lonmin
+            call MPI_allreduce(temp, lonmin, 1, MPI_INTEGER, MPI_MIN,         &
+                 mpicom, ierr)
+            temp = latmin
+            call MPI_allreduce(temp, latmin, 1, MPI_INTEGER, MPI_MIN,         &
+                 mpicom, ierr)
+            ! Create lon coord map which only writes from one of each unique lon
+            where(latvals == latmin)
+               coord_map(:) = grid_map(3, :)
+            elsewhere
+               coord_map(:) = 0_iMap
+            end where
+            lon_coord => horiz_coord_create('lon', 'lon', hdim1_d,            &
+                 'longitude', 'degrees_east', 1, size(lonvals), lonvals,      &
+                 map=coord_map)
+
+            ! Create lat coord map which only writes from one of each unique lat
+            where(lonvals == lonmin)
+               coord_map(:) = grid_map(4, :)
+            elsewhere
+               coord_map(:) = 0_iMap
+            end where
+            lat_coord => horiz_coord_create('lat', 'lat', hdim2_d,            &
+                 'latitude', 'degrees_north', 1, size(latvals), latvals,      &
+                 map=coord_map)
+            deallocate(coord_map)
+         end if
+      end if
+      call cam_grid_register('physgrid', phys_decomp,                         &
+           lat_coord, lon_coord, grid_map, src_in=(/ 1, 0 /),                 &
+           unstruct=unstructured, block_indexed=.false.)
+      ! Copy required attributes from the dynamics array
+      nullify(copy_attributes)
+      call physgrid_copy_attributes_d(copy_gridname, copy_attributes)
+      do index = 1, size(copy_attributes)
+         call cam_grid_attribute_copy(copy_gridname, 'physgrid',              &
+              copy_attributes(index))
+      end do
+
+      if ((.not. cam_grid_attr_exists('physgrid', 'area')) .and.              &
+           unstructured) then
+         ! Physgrid always needs an area attribute. If we did not inherit one
+         !   from the dycore (i.e., physics and dynamics are on different
+         !   grids), create that attribute here (Note, a separate physics
+         !   grid is only supported for unstructured grids).
+         allocate(area_d(size(grid_map, 2)))
+         do col_index = 1, columns_on_task
+            area_d(col_index) = phys_columns(col_index)%area
+         end do
+      end if
+      call cam_grid_attribute_register('physgrid', 'area',                    &
+           'physics column areas', 'ncol', area_d, map=grid_map(3,:))
+      nullify(area_d) ! Belongs to attribute now
+      ! Cleanup pointers (they belong to the grid now)
+      nullify(grid_map)
+      deallocate(latvals)
+      nullify(latvals)
+      deallocate(lonvals)
+      nullify(lonvals)
+      ! Cleanup, we are responsible for copy attributes
+      if (associated(copy_attributes)) then
+         deallocate(copy_attributes)
+         nullify(copy_attributes)
+      end if
+
+      ! Set flag indicating physics grid is now set
+      phys_grid_initialized = .true.
+
+      call t_stopf("phys_grid_init")
+      call t_adj_detailf(+2)
+
+   end subroutine phys_grid_init
+
+   !========================================================================
+
+   real(r8) function get_dlat_p(index)
+      use cam_logfile,    only: iulog
+      use cam_abortutils, only: endrun
+      ! latitude of a physics column in degrees
+
+      ! Dummy argument
+      integer, intent(in) :: index
+      ! Local variables
+      character(len=128)          :: errmsg
+      character(len=*), parameter :: subname = 'get_dlat_p'
+
+      if (.not. phys_grid_initialized) then
+         call endrun(subname//': physics grid not initialized')
+      else if ((index < 1) .or. (index > columns_on_task)) then
+         write(errmsg, '(a,2(a,i0))') subname, ': index (', index,            &
+              ') out of range (1 to ', columns_on_task
+         write(iulog, *) errmsg
+         call endrun(errmsg)
+      else
+         get_dlat_p = phys_columns(index)%lat_deg
+      end if
+
+   end function get_dlat_p
+
+   !========================================================================
+
+   real(r8) function get_dlon_p(index)
+      use cam_logfile,    only: iulog
+      use cam_abortutils, only: endrun
+      ! longitude of a physics column in degrees
+
+      ! Dummy argument
+      integer, intent(in) :: index
+      ! Local variables
+      character(len=128)          :: errmsg
+      character(len=*), parameter :: subname = 'get_dlon_p'
+
+      if (.not. phys_grid_initialized) then
+         call endrun(subname//': physics grid not initialized')
+      else if ((index < 1) .or. (index > columns_on_task)) then
+         write(errmsg, '(a,2(a,i0))') subname, ': index (', index,            &
+              ') out of range (1 to ', columns_on_task
+         write(iulog, *) errmsg
+         call endrun(errmsg)
+      else
+         get_dlon_p = phys_columns(index)%lon_deg
+      end if
+
+   end function get_dlon_p
+
+   !========================================================================
+
+   real(r8) function get_rlat_p(index)
+      use cam_logfile,    only: iulog
+      use cam_abortutils, only: endrun
+      !-----------------------------------------------------------------------
+      !
+      ! get_rlat_p: latitude of a physics column in radians
+      !
+      !-----------------------------------------------------------------------
+
+      ! Dummy argument
+      integer, intent(in) :: index
+      ! Local variables
+      character(len=128)          :: errmsg
+      character(len=*), parameter :: subname = 'get_rlat_p'
+
+      if (.not. phys_grid_initialized) then
+         call endrun(subname//': physics grid not initialized')
+      else if ((index < 1) .or. (index > columns_on_task)) then
+         write(errmsg, '(a,2(a,i0))') subname, ': index (', index,            &
+              ') out of range (1 to ', columns_on_task
+         write(iulog, *) errmsg
+         call endrun(errmsg)
+      else
+         get_rlat_p = phys_columns(index)%lat_rad
+      end if
+
+   end function get_rlat_p
+
+   !========================================================================
+
+   real(r8) function get_rlon_p(index)
+      use cam_logfile,    only: iulog
+      use cam_abortutils, only: endrun
+      !-----------------------------------------------------------------------
+      !
+      ! get_rlon_p: longitude of a physics column in radians
+      !
+      !-----------------------------------------------------------------------
+
+      ! Dummy argument
+      integer, intent(in) :: index
+      ! Local variables
+      character(len=128)          :: errmsg
+      character(len=*), parameter :: subname = 'get_rlon_p'
+
+      if (.not. phys_grid_initialized) then
+         call endrun(subname//': physics grid not initialized')
+      else if ((index < 1) .or. (index > columns_on_task)) then
+         write(errmsg, '(a,2(a,i0))') subname, ': index (', index,            &
+              ') out of range (1 to ', columns_on_task
+         write(iulog, *) errmsg
+         call endrun(errmsg)
+      else
+         get_rlon_p = phys_columns(index)%lon_rad
+      end if
+
+   end function get_rlon_p
+
+   !========================================================================
+
+   subroutine get_rlat_all_p(lcid, rlatdim, rlats)
+      use cam_abortutils, only: endrun
+      !-----------------------------------------------------------------------
+      !
+      ! getrlat_all_p: Return all latitudes (in radians) for chunk, <lcid>
+      !
+      !-----------------------------------------------------------------------
+      ! Dummy Arguments
+      integer,  intent(in)  :: lcid           ! local chunk id
+      integer,  intent(in)  :: rlatdim        ! declared size of output array
+      real(r8), intent(out) :: rlats(rlatdim) ! array of latitudes
+
+      ! Local variables
+      integer               :: index          ! loop index
+      character(len=*), parameter :: subname = 'get_rlat_all_p: '
+
+      !-----------------------------------------------------------------------
+      if ((lcid < begchunk) .or. (lcid > endchunk)) then
+         call endrun(subname//'chunk index out of range')
+      end if
+      do index = chunks(lcid)%phys_col_start, chunks(lcid)%phys_col_end
+         rlats(index) = phys_columns(index)%lat_rad
+      end do
+
+   end subroutine get_rlat_all_p
+
+   !========================================================================
+
+   subroutine get_rlon_all_p(lcid, rlondim, rlons)
+      use cam_abortutils, only: endrun
+      !-----------------------------------------------------------------------
+      !
+      ! Return all longitudes (in radians) for chunk, <lcid>
+      !
+      !-----------------------------------------------------------------------
+      ! Dummy Arguments
+      integer,  intent(in)  :: lcid           ! local chunk id
+      integer,  intent(in)  :: rlondim        ! declared size of output array
+      real(r8), intent(out) :: rlons(rlondim) ! array of longitudes
+
+      ! Local variables
+      integer               :: index          ! loop index
+      character(len=*), parameter :: subname = 'get_rlon_all_p: '
+
+      !-----------------------------------------------------------------------
+      if ((lcid < begchunk) .or. (lcid > endchunk)) then
+         call endrun(subname//'chunk index out of range')
+      end if
+      do index = chunks(lcid)%phys_col_start, chunks(lcid)%phys_col_end
+         rlons(index) = phys_columns(index)%lon_rad
+      end do
+
+   end subroutine get_rlon_all_p
+
+   !========================================================================
+
+   integer function get_ncols_p(lcid)
+      !-----------------------------------------------------------------------
+      !
+      ! get_ncols_p: Return number of columns in chunk given the local chunk id.
+      !
+      !-----------------------------------------------------------------------
+      ! Dummy argument
+      integer, intent(in)  :: lcid      ! local chunk id
+
+      get_ncols_p = chunks(lcid)%ncols
+
+   end function get_ncols_p
+
+   !========================================================================
+
+   real(r8) function get_area_p(index)
+      use cam_logfile,    only: iulog
+      use cam_abortutils, only: endrun
+      ! area of a physics column in radians squared
+
+      ! Dummy argument
+      integer, intent(in) :: index
+      ! Local variables
+      character(len=128)          :: errmsg
+      character(len=*), parameter :: subname = 'get_area_p'
+
+      if (.not. phys_grid_initialized) then
+         call endrun(subname//': physics grid not initialized')
+      else if ((index < 1) .or. (index > columns_on_task)) then
+         write(errmsg, '(a,2(a,i0))') subname, ': index (', index,            &
+              ') out of range (1 to ', columns_on_task
+         write(iulog, *) errmsg
+         call endrun(errmsg)
+      else
+         get_area_p = phys_columns(index)%area
+      end if
+
+   end function get_area_p
+
+   !========================================================================
+
+   integer function get_gcol_p(lcid, col)
+      use cam_logfile,    only: iulog
+      use cam_abortutils, only: endrun
+      ! global column index of a physics column
+
+      ! Dummy arguments
+      integer, intent(in)  :: lcid          ! local chunk id
+      integer, intent(in)  :: col           ! column index
+      ! Local variables
+      integer                     :: index
+      character(len=128)          :: errmsg
+      character(len=*), parameter :: subname = 'get_gcol_p'
+
+      if (.not. phys_grid_initialized) then
+         call endrun(subname//': physics grid not initialized')
+      else if ((lcid < begchunk) .or. (lcid > endchunk)) then
+         write(errmsg, '(a,3(a,i0))') subname, ': lcid (', lcid,              &
+              ') out of range (', begchunk, ' to ', endchunk
+         write(iulog, *) trim(errmsg)
+         call endrun(trim(errmsg))
+      else if ((col < 1) .or. (col > get_ncols_p(lcid))) then
+         write(errmsg, '(a,2(a,i0))') subname, ': col (', col,                &
+              ') out of range (1 to ', get_ncols_p(lcid)
+         write(iulog, *) trim(errmsg)
+         call endrun(trim(errmsg))
+      else
+         index = chunks(lcid)%phys_col_start + col - 1
+         get_gcol_p = phys_columns(index)%global_col_num
+      end if
+
+   end function get_gcol_p
+
+   !========================================================================
+
+   integer function local_index_p(index)
+      use cam_logfile,    only: iulog
+      use cam_abortutils, only: endrun
+      ! local chunk index of a physics column
+
+      ! Dummy argument
+      integer, intent(in) :: index
+      ! Local variables
+      character(len=128)          :: errmsg
+      character(len=*), parameter :: subname = 'local_index_p'
+
+      if (.not. phys_grid_initialized) then
+         call endrun(subname//': physics grid not initialized')
+      else if ((index < 1) .or. (index > columns_on_task)) then
+         write(errmsg, '(a,2(a,i0))') subname, ': index (', index,            &
+              ') out of range (1 to ', columns_on_task
+         write(iulog, *) errmsg
+         call endrun(errmsg)
+      else
+         local_index_p = phys_columns(index)%phys_chunk_index
+      end if
+
+   end function local_index_p
+
+   !========================================================================
+
+   subroutine get_grid_dims(hdim1_d_out, hdim2_d_out)
+      use cam_abortutils, only: endrun
+      ! retrieve dynamics field grid information
+      ! hdim1_d and hdim2_d are dimensions of rectangular horizontal grid
+      ! data structure, If 1D data structure, then hdim2_d == 1.
+      integer, intent(out) :: hdim1_d_out
+      integer, intent(out) :: hdim2_d_out
+
+      if (.not. phys_grid_initialized) then
+         call endrun('get_grid_dims: physics grid not initialized')
+      end if
+      hdim1_d_out = hdim1_d
+      hdim2_d_out = hdim2_d
+
+   end subroutine get_grid_dims
+
+   !========================================================================
+
+   subroutine phys_decomp_to_dyn()
+      !-----------------------------------------------------------------------
+      !
+      ! phys_decomp_to_dyn: Transfer physics data to dynamics decomp
+      !
+      !-----------------------------------------------------------------------
+   end subroutine phys_decomp_to_dyn
+
+   !========================================================================
+
+   subroutine dyn_decomp_to_phys()
+      !-----------------------------------------------------------------------
+      !
+      ! dyn_decomp_to_phys: Transfer dynamics data to physics decomp
+      !
+      !-----------------------------------------------------------------------
+
+   end subroutine dyn_decomp_to_phys
+
+   !========================================================================
+
+   subroutine init_col_assem_p(column_reorder)
+      use spmd_utils,      only: masterproc, column_redist_t
+      use cam_logfile,     only: iulog
+      !-----------------------------------------------------------------------
+      !
+      ! init_col_assem_p: Initialize data needed to perform global sums
+      !
+      ! In order to perform BFB reproducible global sums, large blocks of
+      ! global column space need to be assembled on a subset of tasks.
+      ! This routine provides the information on transfer of information from
+      ! the local physics decomposition to this blocked space.
+      !
+      ! Input: Starting global column number of each 'block'
+      ! Return information needed to facilitate run-time rearrrangement:
+      !        An array (size # of blocks) with the number of local columns
+      !           destined for each block
+      !        An array (size # of local columns), with the global index of
+      !          each local column, collected by block index.
+      !          This array can be used to step through the columns in each
+      !          block in global index order.
+      !        An array which specifies the mapping between the physics decomp
+      !           column order and the 'blocked' order for communication.
+      !
+      !-----------------------------------------------------------------------
+      ! Dummy argument
+      type(column_redist_t), intent(inout) :: column_reorder
+      ! Local variables
+      integer                       :: num_blocks   ! # Intermediate blocks
+      integer                       :: col_ind      ! Local column index
+      integer                       :: block_ind    ! Destination block index
+      integer                       :: gcol         ! Global col #
+      integer,          allocatable :: block_num(:) ! Block # of local col
+      integer,          allocatable :: next_free_index(:)
+      character(len=*), parameter   :: subname = 'init_col_assem_p: '
+
+      ! Checks and initialization
+      if (.not. associated(column_reorder%col_starts)) then
+         call endrun(subname//'col_starts NOT allocated')
+      end if
+      if (associated(column_reorder%task_sizes)) then
+         ! This should not happen but at least we can prevent a memory leak
+         if (masterproc) then
+            write(iulog, *) subname, 'WARNING, task_sizes allocated'
+         end if
+         deallocate(column_reorder%task_sizes)
+      end if
+      nullify(column_reorder%task_sizes)
+      if (associated(column_reorder%task_indices)) then
+         ! This should not happen but at least we can prevent a memory leak
+         if (masterproc) then
+            write(iulog, *) subname, 'WARNING, task_indices allocated'
+         end if
+         deallocate(column_reorder%task_indices)
+      end if
+      nullify(column_reorder%task_indices)
+      if (associated(column_reorder%send_reorder)) then
+         ! This should not happen but at least we can prevent a memory leak
+         if (masterproc) then
+            write(iulog, *) subname, 'WARNING, send_reorder allocated'
+         end if
+         deallocate(column_reorder%send_reorder)
+      end if
+      nullify(column_reorder%send_reorder)
+      num_blocks = size(column_reorder%col_starts, 1)
+      allocate(column_reorder%task_sizes(num_blocks))
+      column_reorder%task_sizes = 0
+      allocate(column_reorder%task_indices(columns_on_task))
+      column_reorder%task_indices = -1
+      allocate(column_reorder%send_reorder(columns_on_task))
+      column_reorder%send_reorder = -1
+      allocate(block_num(columns_on_task))
+      block_num = -1
+      ! Count out number of local columns per destination task
+      do col_ind = 1, columns_on_task
+         gcol = phys_columns(col_ind)%global_col_num
+         do block_ind = num_blocks, 1, -1
+            if (column_reorder%col_starts(block_ind) >= gcol) then
+               column_reorder%task_sizes(block_ind) =                         &
+                    column_reorder%task_sizes(block_ind) + 1
+               block_num(col_ind) = block_ind
+               exit
+            end if
+         end do
+      end do
+      ! Next, fill out the task indices and send_reorder arrays
+      ! next_free_index holds the next available slot for each block
+      ! These variables are used to stage data at run time
+      allocate(next_free_index(num_blocks))
+      next_free_index(1) = 1
+      do block_ind = 2, num_blocks
+         col_ind = column_reorder%task_sizes(block_ind-1)
+         next_free_index(block_ind) = next_free_index(block_ind-1) + col_ind - 1
+      end do
+      do col_ind = 1, columns_on_task
+         block_ind = next_free_index(block_num(col_ind))
+         gcol = phys_columns(col_ind)%global_col_num
+         column_reorder%task_indices(block_ind) = gcol
+         column_reorder%send_reorder(col_ind) = block_ind
+         next_free_index(block_num(col_ind)) = block_ind + 1
+      end do
+      ! Cleanup
+      deallocate(block_num)
+      deallocate(next_free_index)
+   end subroutine init_col_assem_p
+
+   !========================================================================
+
+   subroutine weighted_sum_p(src_field, weighted_sum)
+      use ppgrid, only: pcols, begchunk, endchunk
+      !-----------------------------------------------------------------------
+      !
+      ! weighted_sum_p: Compute the weighted sum of <src_field>
+      !
+      !-----------------------------------------------------------------------
+      ! Dummy arguments
+      real(r8), intent(in)    :: src_field(pcols, begchunk:endchunk)
+      real(r8), intent(out)   :: weighted_sum
+      ! Local variables
+      integer                 :: col_ind, ncol, phys_col
+      integer                 :: lchnk
+      real(r8)                :: weight
+
+      weighted_sum = 0.0_r8
+      do lchnk = begchunk, endchunk
+         ncol = get_ncols_p(lchnk)
+         phys_col = chunks(lchnk)%phys_col_start
+         do col_ind = 1, ncol
+            weight = phys_columns(phys_col)%weight
+            weighted_sum = weighted_sum + (src_field(col_ind, lchnk) * weight)
+            phys_col = phys_col + 1
+         end do
+      end do
+   end subroutine weighted_sum_p
+
+   !========================================================================
+
+   subroutine weighted_field_p(src_field, weighted_field)
+      use ppgrid, only: pcols, begchunk, endchunk
+      !-----------------------------------------------------------------------
+      !
+      ! weighted_field_p: Create a flat, weighted version of <src_field>
+      !
+      !-----------------------------------------------------------------------
+      ! Dummy arguments
+      real(r8),              intent(in)  :: src_field(:,:,:)
+      real(r8), allocatable, intent(out) :: weighted_field(:,:)
+      ! Local variables
+      integer                 :: col_ind, ncol, phys_col
+      integer                 :: num_fields
+      integer                 :: lchnk
+      integer                 :: fld
+      real(r8)                :: src
+      real(r8)                :: weight
+
+      num_fields = SIZE(src_field, 3)
+      if (allocated(weighted_field)) then
+         if (SIZE(weighted_field, 1) /= num_fields) then
+            deallocate(weighted_field)
+         end if
+      end if
+      if (.not. allocated(weighted_field)) then
+         allocate(weighted_field(num_fields, columns_on_task))
+      end if
+      do lchnk = begchunk, endchunk
+         ncol = get_ncols_p(lchnk)
+         phys_col = chunks(lchnk)%phys_col_start
+         do col_ind = 1, ncol
+            weight = phys_columns(phys_col)%weight
+            do fld = 1, num_fields
+               src = src_field(col_ind, lchnk - begchunk + 1, fld)
+               weighted_field(fld, phys_col) =  src * weight
+            end do
+            phys_col = phys_col + 1
+         end do
+      end do
+   end subroutine weighted_field_p
+
+end module phys_grid
