@@ -14,6 +14,8 @@ module phys_grid
    public :: get_rlat_p     ! latitude of a physics column in radians
    public :: get_rlon_p     ! longitude of a physics column in radians
    public :: get_area_p     ! area of a physics column in radians squared
+   public :: get_rlat_all_p ! latitudes of physics cols in chunk (radians)
+   public :: get_rlon_all_p ! longitudes of physics cols in chunk (radians)
    public :: global_index_p ! global column index of a physics column
    public :: local_index_p  ! local column index of a physics column
    public :: get_grid_dims  ! return grid dimensions
@@ -251,6 +253,8 @@ CONTAINS
 
    end subroutine phys_grid_init
 
+   !========================================================================
+
    real(r8) function get_dlat_p(index)
       use cam_logfile,    only: iulog
       use cam_abortutils, only: endrun
@@ -274,6 +278,8 @@ CONTAINS
       end if
 
    end function get_dlat_p
+
+   !========================================================================
 
    real(r8) function get_dlon_p(index)
       use cam_logfile,    only: iulog
@@ -299,6 +305,8 @@ CONTAINS
 
    end function get_dlon_p
 
+   !========================================================================
+
    real(r8) function get_rlat_p(index)
       use cam_logfile,    only: iulog
       use cam_abortutils, only: endrun
@@ -322,6 +330,8 @@ CONTAINS
       end if
 
    end function get_rlat_p
+
+   !========================================================================
 
    real(r8) function get_rlon_p(index)
       use cam_logfile,    only: iulog
@@ -347,6 +357,34 @@ CONTAINS
 
    end function get_rlon_p
 
+   !========================================================================
+
+   subroutine get_rlat_all_p(lcid, rlatdim, rlats)
+      !-----------------------------------------------------------------------
+      !
+      ! Purpose: Return all latitudes (in radians) for chunk
+      !
+      !-----------------------------------------------------------------------
+      use ppgrid
+      ! Dummy Arguments
+      integer,  intent(in)  :: lcid           ! local chunk id
+      integer,  intent(in)  :: rlatdim        ! declared size of output array
+      real(r8), intent(out) :: rlats(rlatdim) ! array of latitudes
+
+      ! Local variables
+      integer               :: index          ! loop index
+      integer               :: cid            ! global chunk id
+
+      !-----------------------------------------------------------------------
+      cid = lchunks(lcid)%cid
+      do i=1,chunks(cid)%ncols
+         rlats(i) = clat_p(chunks(cid)%lat(i))
+      end do
+
+   end subroutine get_rlat_all_p
+
+   !========================================================================
+
    real(r8) function get_area_p(index)
       use cam_logfile,    only: iulog
       use cam_abortutils, only: endrun
@@ -370,6 +408,8 @@ CONTAINS
       end if
 
    end function get_area_p
+
+   !========================================================================
 
    integer function global_index_p(index)
       use cam_logfile,    only: iulog
@@ -395,6 +435,8 @@ CONTAINS
 
    end function global_index_p
 
+   !========================================================================
+
    integer function local_index_p(index)
       use cam_logfile,    only: iulog
       use cam_abortutils, only: endrun
@@ -418,6 +460,8 @@ CONTAINS
       end if
 
    end function local_index_p
+
+   !========================================================================
 
    subroutine get_grid_dims(hdim1_d_out, hdim2_d_out)
       use cam_abortutils, only: endrun

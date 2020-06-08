@@ -33,7 +33,6 @@ use constituents,           only: pcnst
 use physconst,              only: pi
 use cam_initfiles,          only: initial_file_get_id
 use cam_grid_support,       only: iMap
-use dp_mapping,             only: dp_reoorder
 
 use cam_logfile,            only: iulog
 use cam_abortutils,         only: endrun
@@ -78,26 +77,25 @@ public ::       &
    fvm,         &
    edgebuf
 
-public :: &
-   dyn_grid_init,            &
-   get_block_bounds_d,       & ! get first and last indices in global block ordering
-   get_block_gcol_d,         & ! get column indices for given block
-   get_block_gcol_cnt_d,     & ! get number of columns in given block
-   get_block_lvl_cnt_d,      & ! get number of vertical levels in column
-   get_block_levels_d,       & ! get vertical levels in column
-   get_block_owner_d,        & ! get process "owning" given block
-   get_gcol_block_d,         & ! get global block indices and local columns
+public :: dyn_grid_init
+public :: get_dyn_grid_info
+
+public :: get_dyn_grid_parm
+public :: dyn_grid_get_elem_coords ! get coords of a specified block element
+public :: physgrid_copy_attributes_d
+!   get_block_bounds_d,       & ! get first and last indices in global block ordering
+!   get_block_gcol_d,         & ! get column indices for given block
+!   get_block_gcol_cnt_d,     & ! get number of columns in given block
+!   get_block_lvl_cnt_d,      & ! get number of vertical levels in column
+!   get_block_levels_d,       & ! get vertical levels in column
+!   get_block_owner_d,        & ! get process "owning" given block
+!   get_gcol_block_d,         & ! get global block indices and local columns
                                ! index for given global column index
-   get_gcol_block_cnt_d,     & ! get number of blocks containing data
+!   get_gcol_block_cnt_d,     & ! get number of blocks containing data
                                ! from a given global column index
-   get_horiz_grid_dim_d,     &
-   get_horiz_grid_d,         & ! get horizontal grid coordinates
-   get_dyn_grid_parm,        &
-   get_dyn_grid_parm_real1d, &
-   dyn_grid_get_elem_coords, & ! get coordinates of a specified block element
-   dyn_grid_get_colndx,      & ! get element block/column and MPI process indices
+!   get_dyn_grid_parm_real1d, &
+!   dyn_grid_get_colndx,      & ! get element block/column and MPI process indices
                                ! corresponding to a specified global column index
-   physgrid_copy_attributes_d
 
 ! Namelist variables controlling grid writing.
 ! Read in dyn_readnl from dyn_se_inparm group.
@@ -143,7 +141,6 @@ subroutine dyn_grid_init()
    use parallel_mod,        only: par
    use hybrid_mod,          only: hybrid_t, init_loop_ranges, &
                                   get_loop_ranges, config_thread_region
-   use thread_mod ,         only: horz_num_threads
    use control_mod,         only: qsplit, rsplit
    use time_mod,            only: tstep, nsplit
    use fvm_mod,             only: fvm_init2, fvm_init3, fvm_pg_init
@@ -159,7 +156,6 @@ subroutine dyn_grid_init()
 
    type(hybrid_t)              :: hybrid
    integer                     :: ierr
-   integer                     :: neltmp(3)
    integer                     :: dtime
 
    real(r8), allocatable       ::clat(:), clon(:), areaa(:)
@@ -288,7 +284,101 @@ subroutine dyn_grid_init()
 
 end subroutine dyn_grid_init
 
-!=========================================================================================
+!==============================================================================
+
+subroutine get_dyn_grid_info(hdim1_d, hdim2_d, num_lev,                    &
+     dycore_name, index_model_top_layer, index_surface_layer, dyn_columns)
+   use shr_const_mod,       only: SHR_CONST_PI
+   use cam_abortutils,      only: endrun
+   use spmd_utils,          only: iam
+   use physics_column_type, only: physics_column_t
+   ! Dummy arguments
+   integer,          intent(out)   :: hdim1_d ! # longitudes or grid size
+   integer,          intent(out)   :: hdim2_d ! # latitudes or 1
+   integer,          intent(out)   :: num_lev ! # levels
+   character(len=*), intent(out)   :: dycore_name
+   integer,          intent(out)   :: index_model_top_layer
+   integer,          intent(out)   :: index_surface_layer
+   type(physics_column_t), pointer :: dyn_columns(:) ! Phys col in Dyn decomp
+   ! Local variables
+   integer                         :: lindex
+   integer                         :: gindex
+   integer                         :: elem_ind, col_ind, ii, jj
+   integer                         :: num_local_cols
+   real(r8),         parameter     :: radtodeg = 180.0_r8 / SHR_CONST_PI
+   real(r8),         parameter     :: degtorad = SHR_CONST_PI / 180.0_r8
+   character(len=*), parameter     :: subname = 'get_dyn_grid_info'
+
+   if (associated(dyn_columns)) then
+      call endrun(subname//': dyn_columns must be unassociated pointer')
+   end if
+   if (fv_nphys > 0) then ! physics uses an FVM grid
+      num_local_cols = nelemd * nc * nc
+   else
+      num_local_cols = 0
+      do elem_ind = 1, nelemd
+         num_local_cols = num_local_cols + elem(elem_ind)%idxP%NumUniquePts
+      end do
+   end if
+   allocate(dyn_columns(num_local_cols))
+   hdim1_d = ngcols_d
+   hdim2_d = 1
+   num_lev = nlev
+   dycore_name = 'SE'
+   index_model_top_layer = 1
+   index_surface_layer = nlev
+   lindex = 0
+   do elem_ind = 1, nelemd
+      if (fv_nphys > 0) then ! physics uses an FVM grid
+         do col_ind = 0, (nc * nc) - 1
+            ii = MOD(col_ind, nc) + 1
+            jj = col_ind / nc
+            dyn_columns(lindex)%lat_rad = fvm(elem_ind)%center_cart(ii,jj)%lat
+            dyn_columns(lindex)%lat_deg = dyn_columns(lindex)%lat_rad * radtodeg
+            dyn_columns(lindex)%lon_rad = fvm(elem_ind)%center_cart(ii,jj)%lon
+            dyn_columns(lindex)%lon_deg = dyn_columns(lindex)%lon_rad * radtodeg
+            dyn_columns(lindex)%area = fvm(elem_ind)%area_sphere(ii,jj)
+            dyn_columns(lindex)%weight = dyn_columns(lindex)%area
+            ! File decomposition
+            gindex = ((elem(elem_ind)%GlobalId-1) * nc * nc) + col_ind
+            dyn_columns(lindex)%global_col_num = gindex
+            ! Note, coord_indices not used for unstructured dycores
+            ! Dynamics decomposition
+            dyn_columns(lindex)%dyn_task = iam
+            dyn_columns(lindex)%local_dyn_block = elem_ind
+            dyn_columns(lindex)%global_dyn_block = elem(elem_ind)%GlobalId
+            allocate(dyn_columns(lindex)%dyn_block_index(1))
+            dyn_columns(lindex)%dyn_block_index(1) = col_ind
+         end do
+      else
+         do col_ind = 1, elem(elem_ind)%idxP%NumUniquePts
+            lindex = lindex + 1
+            ii = elem(elem_ind)%idxP%ia(col_ind)
+            jj = elem(elem_ind)%idxP%ja(col_ind)
+
+            dyn_columns(lindex)%lat_rad = elem(elem_ind)%spherep(ii,jj)%lat
+            dyn_columns(lindex)%lat_deg = dyn_columns(lindex)%lat_rad * radtodeg
+            dyn_columns(lindex)%lon_rad = elem(elem_ind)%spherep(ii,jj)%lon
+            dyn_columns(lindex)%lon_deg = dyn_columns(lindex)%lon_rad * radtodeg
+            dyn_columns(lindex)%area = 1.0_r8 / elem(elem_ind)%rspheremp(ii,jj)
+            dyn_columns(lindex)%weight = dyn_columns(lindex)%area
+            ! File decomposition
+            gindex = elem(elem_ind)%idxP%UniquePtoffset + col_ind - 1
+            dyn_columns(lindex)%global_col_num = gindex
+            ! Note, coord_indices not used for unstructured dycores
+            ! Dynamics decomposition
+            dyn_columns(lindex)%dyn_task = iam
+            dyn_columns(lindex)%local_dyn_block = elem_ind
+            dyn_columns(lindex)%global_dyn_block = elem(elem_ind)%GlobalId
+            allocate(dyn_columns(lindex)%dyn_block_index(1))
+            dyn_columns(lindex)%dyn_block_index(1) = col_ind
+         end do
+      end if
+   end do
+
+   end subroutine get_dyn_grid_info
+
+!==============================================================================
 
 subroutine get_block_bounds_d(block_first, block_last)
 
@@ -340,7 +430,6 @@ integer function get_block_gcol_cnt_d(blockid)
 
    integer, intent(in) :: blockid
 
-   integer :: ie
    !----------------------------------------------------------------------------
 
    if (fv_nphys > 0) then
@@ -799,31 +888,9 @@ subroutine dyn_grid_get_colndx(igcol, ncols, owners, col, lbk)
    integer, intent(out) :: col(ncols)
    integer, intent(out) :: lbk(ncols)
 
-   integer  :: i, j, k, ii
-   integer  :: blockid(1), bcid(1), lclblockid(1)
    !----------------------------------------------------------------------------
 
-   if (fv_nphys > 0) then
-      call endrun('dyn_grid_get_colndx: not implemented for the FVM physics grid')
-   end if
-
-   do i = 1, ncols
-
-      call get_gcol_block_d(igcol(i), 1, blockid, bcid, lclblockid)
-      owners(i) = get_block_owner_d(blockid(1))
-
-      if (owners(i) == iam) then
-         lbk(i) = lclblockid(1)
-         ii     = igcol(i) - elem(lbk(i))%idxp%UniquePtoffset + 1
-         k      = elem(lbk(i))%idxp%ia(ii)
-         j      = elem(lbk(i))%idxp%ja(ii)
-         col(i) = k + (j - 1)*np
-      else
-         lbk(i) = -1
-         col(i) = -1
-      end if
-
-   end do
+   call endrun('dyn_grid_get_colndx: not implemented for unstructured grids')
 
 end subroutine dyn_grid_get_colndx
 
@@ -1229,72 +1296,8 @@ end subroutine write_grid_mapping
 
 !=========================================================================================
 
-subroutine gblocks_init()
-
-   ! construct global array of type block_global_data objects for GLL grid
-
-   integer :: ie, p
-   integer :: ibuf
-   integer :: ierr
-   integer :: rdispls(npes), recvcounts(npes), gid(npes), lid(npes)
-   !----------------------------------------------------------------------------
-
-   if (.not. allocated(gblocks)) then
-      if (masterproc) then
-         write(iulog, *) 'INFO: Non-scalable action: Allocating global blocks in SE dycore.'
-      end if
-      allocate(gblocks(nelem_d))
-      do ie = 1, nelem_d
-         gblocks(ie)%Owner          = -1
-         gblocks(ie)%UniquePtOffset = -1
-         gblocks(ie)%NumUniqueP     = -1
-         gblocks(ie)%LocalID        = -1
-      end do
-   end if
-
-   ! nelemdmax is the maximum number of elements in a dynamics task
-   ! nelemd is the actual number of elements in a dynamics task
-
-   do ie = 1, nelemdmax
-
-      if (ie <= nelemd) then
-         rdispls(iam+1)    = elem(ie)%idxP%UniquePtOffset - 1
-         gid(iam+1)        = elem(ie)%GlobalID
-         lid(iam+1)        = ie
-         recvcounts(iam+1) = elem(ie)%idxP%NumUniquePts
-      else
-         rdispls(iam+1)    = 0
-         recvcounts(iam+1) = 0
-         gid(iam+1)        = 0
-      endif
-
-      ibuf = lid(iam+1)
-      call mpi_allgather(ibuf, 1, mpi_integer, lid, 1, mpi_integer, mpicom, ierr)
-
-      ibuf = gid(iam+1)
-      call mpi_allgather(ibuf, 1, mpi_integer, gid, 1, mpi_integer, mpicom, ierr)
-
-      ibuf = rdispls(iam+1)
-      call mpi_allgather(ibuf, 1, mpi_integer, rdispls, 1, mpi_integer, mpicom, ierr)
-
-      ibuf = recvcounts(iam+1)
-      call mpi_allgather(ibuf, 1, mpi_integer, recvcounts, 1, mpi_integer, mpicom, ierr)
-
-      do p = 1, npes
-         if (gid(p) > 0) then
-            gblocks(gid(p))%UniquePtOffset = rdispls(p) + 1
-            gblocks(gid(p))%NumUniqueP     = recvcounts(p)
-            gblocks(gid(p))%LocalID        = lid(p)
-            gblocks(gid(p))%Owner          = p - 1
-         end if
-      end do
-   end do
-
-end subroutine gblocks_init
-
-!=========================================================================================
-
 subroutine create_global_area(area_d)
+   use dp_mapping, only: dp_reorder, dp_allocate, dp_deallocate
 
    ! Gather global array of column areas for the physics grid,
    ! reorder to global column order, then broadcast it to all tasks.
@@ -1320,7 +1323,7 @@ subroutine create_global_area(area_d)
    if (fv_nphys > 0) then ! physics uses an FVM grid
 
       ! first gather all data onto masterproc, in mpi task order (via
-      ! mpi_gatherv) then redorder into globalID order (via dp_reoorder)
+      ! mpi_gatherv) then redorder into globalID order (via dp_reorder)
       ncol = fv_nphys*fv_nphys*nelem_d
       allocate(rbuf(ncol))
       allocate(dp_area(fv_nphys*fv_nphys,nelem_d))
@@ -1354,7 +1357,9 @@ subroutine create_global_area(area_d)
                        recvcounts, rdispls, mpi_real8, mstrid, mpicom, ierr)
 
       ! Reorder to global order
-      if (masterproc) call dp_reoorder(rbuf, area_d)
+      call dp_allocate(elem)
+      if (masterproc) call dp_reorder(rbuf, area_d)
+      call dp_deallocate()
 
       ! Send everyone else the data
       call mpi_bcast(area_d, ncol, mpi_real8, mstrid, mpicom, ierr)
@@ -1401,6 +1406,7 @@ end subroutine create_global_area
 !=========================================================================================
 
 subroutine create_global_coords(clat, clon, lat_out, lon_out)
+   use dp_mapping, only: dp_reorder, dp_allocate, dp_deallocate
 
    ! Gather global arrays of column coordinates for the physics grid,
    ! reorder to global column order, then broadcast to all tasks.
@@ -1437,7 +1443,7 @@ subroutine create_global_coords(clat, clon, lat_out, lon_out)
    if (fv_nphys > 0) then  ! physics uses an FVM grid
 
       ! first gather all data onto masterproc, in mpi task order (via
-      ! mpi_gatherv) then redorder into globalID order (via dp_reoorder)
+      ! mpi_gatherv) then redorder into globalID order (via dp_reorder)
 
       ncol = fv_nphys*fv_nphys*nelem_d
       allocate(rbuf(ncol))
@@ -1475,7 +1481,8 @@ subroutine create_global_coords(clat, clon, lat_out, lon_out)
                        recvcounts, rdispls, mpi_real8, mstrid, mpicom, ierr)
 
       ! Reorder to global order
-      if (masterproc) call dp_reoorder(rbuf, clat)
+      call dp_allocate(elem)
+      if (masterproc) call dp_reorder(rbuf, clat)
 
       ! Send everyone else the data
       call mpi_bcast(clat, ncol, mpi_real8, mstrid, mpicom, ierr)
@@ -1485,7 +1492,8 @@ subroutine create_global_coords(clat, clon, lat_out, lon_out)
                        recvcounts, rdispls, mpi_real8, mstrid, mpicom, ierr)
 
       ! Reorder to global order
-      if (masterproc) call dp_reoorder(rbuf, clon)
+      if (masterproc) call dp_reorder(rbuf, clon)
+      call dp_deallocate()
 
       ! Send everyone else the data
       call mpi_bcast(clon, ncol, mpi_real8, mstrid, mpicom, ierr)

@@ -2914,6 +2914,13 @@ sub write_filepath
     print $fh "$camsrcdir/src/physics/cam\n";
 
     # Dynamics package and test utilities
+    if ($weak_scale_fix_opt) {
+        my $wdir = "$camsrcdir/src/physics/weak_scaling/$dyn";
+        if (! -d "$wdir") {
+            die "** No weak scaling directory for dycore = $dyn\n";
+        }
+        print $fh "$wdir\n";
+    }
     print $fh "$camsrcdir/src/dynamics/$dyn\n";
     if($dyn eq 'se') {
         if ($weak_scale_fix_opt) {
