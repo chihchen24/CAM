@@ -374,10 +374,14 @@ CONTAINS
       ! Purpose: Deallocate arrays and reset to uninitialized state
       !
       !-----------------------------------------------------------------------
+
+      ! Local variable
+      integer :: ierr
+
       initialized = .false.
       use_repro_sum = .false.
       if (column_reorder%mpi_comm /= MPI_COMM_NULL) then
-         call mpi_comm_free(column_reorder%mpi_comm, ierr)
+         call MPI_comm_free(column_reorder%mpi_comm, ierr)
          column_reorder%mpi_comm = MPI_COMM_NULL
       end if
       if (associated(column_reorder%dest_tasks)) then

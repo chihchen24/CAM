@@ -41,8 +41,7 @@ use cam_abortutils,         only: endrun
 use pio,                    only: file_desc_t
 
 use dimensions_mod,         only: globaluniquecols, nelem, nelemd, nelemdmax, &
-                                  ne, np, npsq, fv_nphys, nlev, nc, ntrac,    &
-                                  qsize_condensate_loading
+                                  ne, np, npsq, fv_nphys, nlev, nc, ntrac
 use element_mod,            only: element_t
 use fvm_control_volume_mod, only: fvm_struct
 use hybvcoord_mod,          only: hvcoord_t
@@ -155,6 +154,7 @@ subroutine dyn_grid_init()
    use fvm_mod,             only: fvm_init2, fvm_init3, fvm_pg_init
    use dimensions_mod,      only: irecons_tracer
    use comp_gll_ctr_vol,    only: gll_grid_write
+   use physconst,           only: thermodynamic_active_species_num
 
    ! Local variables
 
@@ -199,7 +199,7 @@ subroutine dyn_grid_init()
       end if
 
       if (fv_nphys > 0) then
-         qsize_local = qsize_condensate_loading + 3
+         qsize_local = thermodynamic_active_species_num + 3
       else
          qsize_local = pcnst + 3
       end if
@@ -539,10 +539,11 @@ subroutine get_gcol_block_d(gcol, cnt, blockid, bcid, localblockid)
 
    use dp_mapping,     only: dp_owner
 
-   ! Return global block index and local column index for given global column index.
+   ! Return global block index and local column index for given global
+   !      column index.
    !
-   ! The SE dycore assigns each global column to a singe element.  So cnt is assumed
-   ! to be 1.
+   ! The SE dycore assigns each global column to a singe element, therefore,
+   !      cnt must be 1.
 
    ! arguments
    integer, intent(in)            :: gcol     ! global column index
@@ -558,6 +559,10 @@ subroutine get_gcol_block_d(gcol, cnt, blockid, bcid, localblockid)
    integer, save :: iedex_save = 1
    character(len=*), parameter :: subname='get_gcol_block_d'
    !----------------------------------------------------------------------------
+
+   if (cnt /= 1) then
+      call endrun(subname//': cnt must be 1')
+   end if
 
    if (fv_nphys > 0) then
 

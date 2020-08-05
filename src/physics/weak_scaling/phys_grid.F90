@@ -21,7 +21,9 @@ module phys_grid
    public :: get_rlon_all_p     ! longitudes of physics cols in chunk (radians)
    public :: get_ncols_p        ! number of columns in a chunk
    public :: get_gcol_p         ! global column index of a physics column
-   public :: local_index_p      ! local chunk index of a physics column
+   public :: get_gcol_all_p     ! global col index of all phys cols in a chunk
+   public :: get_dyn_col_p      ! dynamics local blk number and blk offset(s)
+   public :: get_chunk_info_p   ! chunk index and col # of a physics column
    public :: get_grid_dims      ! return grid dimensions
    ! Physics-dynamics coupling
    public :: phys_decomp_to_dyn ! Transfer physics data to dynamics decomp
@@ -60,6 +62,11 @@ module phys_grid
    ! Max number of double-precision fields on a task for global calculations
    ! A value of -1 signifies no limit.
    integer,     protected, public :: phys_global_max_fields = -1
+
+   interface get_dyn_col_p
+      module procedure :: get_dyn_col_p_chunk
+      module procedure :: get_dyn_col_p_index
+   end interface get_dyn_col_p
 
    ! These variables are last to provide a limited table to search
 
@@ -547,12 +554,12 @@ CONTAINS
       integer, intent(in) :: index
       ! Local variables
       character(len=128)          :: errmsg
-      character(len=*), parameter :: subname = 'get_area_p'
+      character(len=*), parameter :: subname = 'get_area_p: '
 
       if (.not. phys_grid_initialized) then
          call endrun(subname//': physics grid not initialized')
       else if ((index < 1) .or. (index > columns_on_task)) then
-         write(errmsg, '(a,2(a,i0))') subname, ': index (', index,            &
+         write(errmsg, '(a,2(a,i0))') subname, 'index (', index,              &
               ') out of range (1 to ', columns_on_task
          write(iulog, *) errmsg
          call endrun(errmsg)
@@ -575,17 +582,17 @@ CONTAINS
       ! Local variables
       integer                     :: index
       character(len=128)          :: errmsg
-      character(len=*), parameter :: subname = 'get_gcol_p'
+      character(len=*), parameter :: subname = 'get_gcol_p: '
 
       if (.not. phys_grid_initialized) then
-         call endrun(subname//': physics grid not initialized')
+         call endrun(subname//'physics grid not initialized')
       else if ((lcid < begchunk) .or. (lcid > endchunk)) then
-         write(errmsg, '(a,3(a,i0))') subname, ': lcid (', lcid,              &
+         write(errmsg, '(a,3(a,i0))') subname, 'lcid (', lcid,                &
               ') out of range (', begchunk, ' to ', endchunk
          write(iulog, *) trim(errmsg)
          call endrun(trim(errmsg))
       else if ((col < 1) .or. (col > get_ncols_p(lcid))) then
-         write(errmsg, '(a,2(a,i0))') subname, ': col (', col,                &
+         write(errmsg, '(a,2(a,i0))') subname, 'col (', col,                  &
               ') out of range (1 to ', get_ncols_p(lcid)
          write(iulog, *) trim(errmsg)
          call endrun(trim(errmsg))
@@ -598,29 +605,158 @@ CONTAINS
 
    !========================================================================
 
-   integer function local_index_p(index)
+   subroutine get_dyn_col_p_chunk(lcid, col, blk_num, blk_ind)
       use cam_logfile,    only: iulog
       use cam_abortutils, only: endrun
-      ! local chunk index of a physics column
+      ! Return the dynamics local block number and block offset(s) for
+      ! the physics column indicated by <lcid> (chunk) and <col> (column).
 
-      ! Dummy argument
-      integer, intent(in) :: index
+      ! Dummy arguments
+      integer, intent(in)  :: lcid          ! local chunk id
+      integer, intent(in)  :: col           ! Column index
+      integer, intent(out) :: blk_num       ! Local dynamics block index
+      integer, intent(out) :: blk_ind(:)    ! Local dynamics block offset(s)
+      ! Local variables
+      integer                     :: index
+      integer                     :: off_size
+      character(len=128)          :: errmsg
+      character(len=*), parameter :: subname = 'get_dyn_col_p_chunk: '
+
+      if (.not. phys_grid_initialized) then
+         call endrun(subname//'physics grid not initialized')
+      else if ((lcid < begchunk) .or. (lcid > endchunk)) then
+         write(errmsg, '(a,3(a,i0))') subname, 'lcid (', lcid,                &
+              ') out of range (', begchunk, ' to ', endchunk
+         write(iulog, *) trim(errmsg)
+         call endrun(trim(errmsg))
+      else if ((col < 1) .or. (col > get_ncols_p(lcid))) then
+         write(errmsg, '(a,2(a,i0))') subname, 'col (', col,                  &
+              ') out of range (1 to ', get_ncols_p(lcid)
+         write(iulog, *) trim(errmsg)
+         call endrun(trim(errmsg))
+      else
+         index = chunks(lcid)%phys_col_start + col - 1
+         off_size = SIZE(phys_columns(index)%dyn_block_index, 1)
+         if (SIZE(blk_ind, 1) < off_size) then
+            call endrun(subname//'blk_ind too small')
+         end if
+         blk_num = phys_columns(index)%local_dyn_block
+         blk_ind(1:off_size) = phys_columns(index)%dyn_block_index(1:off_size)
+         if (SIZE(blk_ind, 1) > off_size) then
+            blk_ind(off_size+1:) = -1
+         end if
+      end if
+
+   end subroutine get_dyn_col_p_chunk
+
+   !========================================================================
+
+   subroutine get_dyn_col_p_index(index, blk_num, blk_ind)
+      use cam_logfile,    only: iulog
+      use cam_abortutils, only: endrun
+      ! Return the dynamics local block number and block offset(s) for
+      ! the physics column indicated by <index>.
+
+      ! Dummy arguments
+      integer, intent(in)  :: index         ! index of local physics column
+      integer, intent(out) :: blk_num       ! Local dynamics block index
+      integer, intent(out) :: blk_ind(:)    ! Local dynamics block offset(s)
+      ! Local variables
+      integer                     :: off_size
+      character(len=128)          :: errmsg
+      character(len=*), parameter :: subname = 'get_dyn_col_p_index: '
+
+      if (.not. phys_grid_initialized) then
+         call endrun(subname//'physics grid not initialized')
+      else if ((index < 1) .or. (index > columns_on_task)) then
+         write(errmsg, '(a,2(a,i0))') subname, 'index (', index,              &
+              ') out of range (1 to ', columns_on_task
+         write(iulog, *) trim(errmsg)
+         call endrun(trim(errmsg))
+      else
+         off_size = SIZE(phys_columns(index)%dyn_block_index, 1)
+         if (SIZE(blk_ind, 1) < off_size) then
+            call endrun(subname//'blk_ind too small')
+         end if
+         blk_num = phys_columns(index)%local_dyn_block
+         blk_ind(1:off_size) = phys_columns(index)%dyn_block_index(1:off_size)
+         if (SIZE(blk_ind, 1) > off_size) then
+            blk_ind(off_size+1:) = -1
+         end if
+      end if
+
+   end subroutine get_dyn_col_p_index
+
+   !========================================================================
+
+   subroutine get_gcol_all_p(lcid, gdim, gcols)
+      use cam_logfile,    only: iulog
+      use cam_abortutils, only: endrun
+      use spmd_utils,     only: masterproc
+      ! collect global column indices of all physics columns in a chunk
+
+      ! Dummy arguments
+      integer, intent(in)  :: lcid          ! local chunk id
+      integer, intent(in)  :: gdim          ! gcols dimension
+      integer, intent(out) :: gcols(:)      ! global column indices
+      ! Local variables
+      integer                     :: col_start
+      integer                     :: ncol, col_ind
+      character(len=128)          :: errmsg
+      character(len=*), parameter :: subname = 'get_gcol_all_p: '
+
+      if (.not. phys_grid_initialized) then
+         call endrun(subname//'physics grid not initialized')
+      else if ((lcid < begchunk) .or. (lcid > endchunk)) then
+         write(errmsg, '(a,3(a,i0))') subname, 'lcid (', lcid,                &
+              ') out of range (', begchunk, ' to ', endchunk
+         write(iulog, *) trim(errmsg)
+         call endrun(trim(errmsg))
+      else
+         col_start = chunks(lcid)%phys_col_start
+         ncol = chunks(lcid)%ncols
+         if (gdim < ncol) then
+            if (masterproc) then
+               write(iulog, '(2a,2(i0,a))') subname, 'WARNING: gdim (', gdim, &
+                    ') < ncol (', ncol,'), not all indices will be filled.'
+            end if
+            gcols(gdim+1:ncol) = -1
+         end if
+         do col_ind = 1, MIN(ncol, gdim)
+            gcols(col_ind) = phys_columns(col_start+col_ind-1)%global_col_num
+         end do
+      end if
+
+   end subroutine get_gcol_all_p
+
+   !========================================================================
+
+   subroutine get_chunk_info_p(index, lchnk, icol)
+      use cam_logfile,    only: iulog
+      use cam_abortutils, only: endrun
+      ! local chunk index and column number of a physics column
+
+      ! Dummy arguments
+      integer, intent(in)  :: index
+      integer, intent(out) :: lchnk
+      integer, intent(out) :: icol
       ! Local variables
       character(len=128)          :: errmsg
-      character(len=*), parameter :: subname = 'local_index_p'
+      character(len=*), parameter :: subname = 'get_chunk_info_p: '
 
       if (.not. phys_grid_initialized) then
          call endrun(subname//': physics grid not initialized')
       else if ((index < 1) .or. (index > columns_on_task)) then
-         write(errmsg, '(a,2(a,i0))') subname, ': index (', index,            &
+         write(errmsg, '(a,2(a,i0))') subname, 'index (', index,              &
               ') out of range (1 to ', columns_on_task
          write(iulog, *) errmsg
          call endrun(errmsg)
       else
-         local_index_p = phys_columns(index)%phys_chunk_index
+         lchnk = phys_columns(index)%phys_chunk_index
+         icol = phys_columns(index)%phys_chunk_index
       end if
 
-   end function local_index_p
+   end subroutine get_chunk_info_p
 
    !========================================================================
 
