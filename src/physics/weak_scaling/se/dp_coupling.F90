@@ -14,10 +14,8 @@ use dyn_grid,       only: get_gcol_block_d, TimeLevel, edgebuf
 use dyn_comp,       only: dyn_export_t, dyn_import_t
 
 use physics_types,  only: physics_state, physics_tend
-use phys_grid,      only: get_ncols_p, get_gcol_all_p, block_to_chunk_send_pters, &
-                          transpose_block_to_chunk, block_to_chunk_recv_pters,    &
-                          chunk_to_block_send_pters, transpose_chunk_to_block,    &
-                          chunk_to_block_recv_pters
+use phys_grid,      only: get_ncols_p
+use phys_grid,      only: get_dyn_col_p, columns_on_task, get_chunk_info_p
 use physics_buffer, only: physics_buffer_desc, pbuf_get_chunk, pbuf_get_field
 
 use dp_mapping,     only: nphys_pts
@@ -86,13 +84,14 @@ subroutine d_p_coupling(phys_state, phys_tend,  pbuf2d, dyn_out)
    ! Frontogenesis
    real (kind=r8),  allocatable :: frontgf(:,:,:)      ! temp arrays to hold frontogenesis
    real (kind=r8),  allocatable :: frontga(:,:,:)      ! function (frontgf) and angle (frontga)
+   real (kind=r8),  allocatable :: frontgf_phys(:,:,:)
+   real (kind=r8),  allocatable :: frontga_phys(:,:,:)
                                                         ! Pointers to pbuf
    real (kind=r8),  pointer     :: pbuf_frontgf(:,:)
    real (kind=r8),  pointer     :: pbuf_frontga(:,:)
 
    integer                      :: ncols,i,j,ierr,k,iv
-   integer                      :: ioff, m, m_cnst
-   integer                      :: pgcols(pcols), idmb1(1), idmb2(1), idmb3(1)
+   integer                      :: col_ind, blk_ind, m, m_cnst
    integer                      :: tsize               ! amount of data per grid point passed to physics
    integer,         allocatable :: bpter(:,:)          ! offsets into block buffer for packing data
    integer                      :: cpter(pcols,0:pver) ! offsets into chunk buffer for unpacking data
@@ -210,7 +209,9 @@ subroutine d_p_coupling(phys_state, phys_tend,  pbuf2d, dyn_out)
 
    endif ! iam < par%nprocs
 
-   if (fv_nphys<1) deallocate(qgll)
+   if (fv_nphys < 1) then
+      deallocate(qgll)
+   end if
 
    ! q_prev is for saving the tracer fields for calculating tendencies
    if (.not. allocated(q_prev)) then
@@ -219,161 +220,57 @@ subroutine d_p_coupling(phys_state, phys_tend,  pbuf2d, dyn_out)
    q_prev = 0.0_R8
 
    call t_startf('dpcopy')
-   if (local_dp_map) then
-
-      !$omp parallel do num_threads(max_num_threads) private (lchnk, ncols, pgcols, icol, idmb1, idmb2, idmb3, ie, ioff, ilyr, m, pbuf_chnk, pbuf_frontgf, pbuf_frontga)
-      do lchnk = begchunk, endchunk
-
-         ncols = get_ncols_p(lchnk)
-         call get_gcol_all_p(lchnk, pcols, pgcols)
-
-         pbuf_chnk => pbuf_get_chunk(pbuf2d, lchnk)
-         if (use_gw_front .or. use_gw_front_igw) then
-            call pbuf_get_field(pbuf_chnk, frontgf_idx, pbuf_frontgf)
-            call pbuf_get_field(pbuf_chnk, frontga_idx, pbuf_frontga)
-         end if
-
-         do icol = 1, ncols
-            call get_gcol_block_d(pgcols(icol),1,idmb1,idmb2,idmb3)
-            ie   = idmb3(1)
-            ioff = idmb2(1)
-            phys_state(lchnk)%ps(icol)   = ps_tmp(ioff,ie)
-            phys_state(lchnk)%phis(icol) = phis_tmp(ioff,ie)
-            do ilyr=1,pver
-               phys_state(lchnk)%pdel(icol,ilyr)  = dp3d_tmp(ioff,ilyr,ie)
-               phys_state(lchnk)%t(icol,ilyr)     = T_tmp(ioff,ilyr,ie)
-               phys_state(lchnk)%u(icol,ilyr)     = uv_tmp(ioff,1,ilyr,ie)
-               phys_state(lchnk)%v(icol,ilyr)     = uv_tmp(ioff,2,ilyr,ie)
-               phys_state(lchnk)%omega(icol,ilyr) = omega_tmp(ioff,ilyr,ie)
-
-               if (use_gw_front .or. use_gw_front_igw) then
-                  pbuf_frontgf(icol,ilyr) = frontgf(ioff,ilyr,ie)
-                  pbuf_frontga(icol,ilyr) = frontga(ioff,ilyr,ie)
-               endif
-            end do
-
-            do m = 1, pcnst
-               do ilyr = 1, pver
-                  phys_state(lchnk)%q(icol,ilyr,m) = Q_tmp(ioff,ilyr,m,ie)
-               end do
-            end do
-         end do
-      end do
-
-   else  ! .not. local_dp_map
-
-      tsize = 5 + pcnst
-      if (use_gw_front .or. use_gw_front_igw) tsize = tsize + 2
-
-      allocate(bbuffer(tsize*block_buf_nrecs))
-      allocate(cbuffer(tsize*chunk_buf_nrecs))
-      if (fv_nphys > 0) then
-         allocate(bpter(fv_nphys*fv_nphys,0:pver))
-      else
-         allocate(bpter(npsq,0:pver))
-      end if
-
-      if (iam < par%nprocs) then
-         !$omp parallel do num_threads(max_num_threads) private (ie, bpter, icol, ilyr, m, ncols, ioff)
-         do ie = 1, nelemd
-
-            if (fv_nphys > 0) then
-               call block_to_chunk_send_pters(elem(ie)%GlobalID, fv_nphys*fv_nphys,  &
-                  pver+1, tsize, bpter)
-               ncols = fv_nphys*fv_nphys
-            else
-               call block_to_chunk_send_pters(elem(ie)%GlobalID, npsq,       &
-                  pver+1, tsize, bpter)
-               ncols = elem(ie)%idxP%NumUniquePts
-            end if
-
-            do icol=1,ncols
-               bbuffer(bpter(icol,0)+2:bpter(icol,0)+tsize-1) = 0.0_r8
-               bbuffer(bpter(icol,0))   = ps_tmp(icol,ie)
-               bbuffer(bpter(icol,0)+1) = phis_tmp(icol,ie)
-
-               do ilyr=1,pver
-                  ioff = 0
-                  bbuffer(bpter(icol,ilyr)+ioff) = T_tmp(icol,ilyr,ie)
-                  ioff = ioff + 1
-                  bbuffer(bpter(icol,ilyr)+ioff) = uv_tmp(icol,1,ilyr,ie)
-                  ioff = ioff + 1
-                  bbuffer(bpter(icol,ilyr)+ioff) = uv_tmp(icol,2,ilyr,ie)
-                  ioff = ioff + 1
-                  bbuffer(bpter(icol,ilyr)+ioff) = omega_tmp(icol,ilyr,ie)
-                  ioff = ioff + 1
-                  bbuffer(bpter(icol,ilyr)+ioff) = dp3d_tmp(icol,ilyr,ie)
-                  if (use_gw_front .or. use_gw_front_igw) then
-                     ioff = ioff + 1
-                     bbuffer(bpter(icol,ilyr)+ioff) = frontgf(icol,ilyr,ie)
-                     ioff = ioff + 1
-                     bbuffer(bpter(icol,ilyr)+ioff) = frontga(icol,ilyr,ie)
-                  end if
-
-                  do m=1,pcnst
-                     bbuffer(bpter(icol,ilyr)+tsize-pcnst-1+m) = Q_tmp(icol,ilyr,m,ie)
-                  end do
-               end do
-            end do
-         end do
-
-      else
-         bbuffer(:) = 0._r8
-      end if
-
-      call t_barrierf ('sync_blk_to_chk', mpicom)
-      call t_startf ('block_to_chunk')
-      call transpose_block_to_chunk(tsize, bbuffer, cbuffer)
-      call t_stopf  ('block_to_chunk')
-
-      !$omp parallel do num_threads(max_num_threads) private (lchnk, ncols, cpter, icol, ilyr, m, pbuf_chnk, pbuf_frontgf, pbuf_frontga, ioff)
-      do lchnk = begchunk, endchunk
-         ncols = phys_state(lchnk)%ncol
-
-         pbuf_chnk => pbuf_get_chunk(pbuf2d, lchnk)
-
-         if (use_gw_front .or. use_gw_front_igw) then
-            call pbuf_get_field(pbuf_chnk, frontgf_idx, pbuf_frontgf)
-            call pbuf_get_field(pbuf_chnk, frontga_idx, pbuf_frontga)
-         end if
-
-         call block_to_chunk_recv_pters(lchnk,pcols,pver+1,tsize,cpter)
-
-         do icol = 1, ncols
-            phys_state(lchnk)%ps(icol)   = cbuffer(cpter(icol,0))
-            phys_state(lchnk)%phis(icol) = cbuffer(cpter(icol,0)+1)
-
-            do ilyr = 1, pver
-               ioff = 0
-               phys_state(lchnk)%t(icol,ilyr)     = cbuffer(cpter(icol,ilyr)+ioff)
-               ioff = ioff + 1
-               phys_state(lchnk)%u(icol,ilyr)     = cbuffer(cpter(icol,ilyr)+ioff)
-               ioff = ioff + 1
-               phys_state(lchnk)%v(icol,ilyr)     = cbuffer(cpter(icol,ilyr)+ioff)
-               ioff = ioff + 1
-               phys_state(lchnk)%omega(icol,ilyr) = cbuffer(cpter(icol,ilyr)+ioff)
-               ioff = ioff + 1
-               phys_state(lchnk)%pdel(icol,ilyr)  = cbuffer(cpter(icol,ilyr)+ioff)
-
-               if (use_gw_front .or. use_gw_front_igw) then
-                  ioff = ioff + 1
-                  pbuf_frontgf(icol,ilyr) = cbuffer(cpter(icol,ilyr)+ioff)
-                  ioff = ioff + 1
-                  pbuf_frontga(icol,ilyr) = cbuffer(cpter(icol,ilyr)+ioff)
-               endif
-
-               do m = 1, pcnst
-                  phys_state(lchnk)%q  (icol,ilyr,m) = cbuffer(cpter(icol,ilyr)+tsize-pcnst-1+m)
-               end do
-
-            end do
-         end do
-      end do
-
-      deallocate( bbuffer )
-      deallocate( cbuffer )
-
+   if (.not. local_dp_map) then
+      call endrun('d_p_coupling: Weak scaling does not support load balancing')
    end if
+
+   if (use_gw_front .or. use_gw_front_igw) then
+      allocate(frontgf_phys(pcols, pver, begchunk:endchunk))
+      allocate(frontga_phys(pcols, pver, begchunk:endchunk))
+   end if
+   !$omp parallel do num_threads(max_num_threads) private (col_ind, lchnk, ncols, icol, ie, blk_ind, ilyr, m, pbuf_chnk)
+   do col_ind = 1,
+      call get_dyn_col_p(col_index, ie, blk_ind)
+      call get_chunk_info_p(col_index, lchnk, icol)
+      phys_state(lchnk)%ps(icol)   = ps_tmp(blk_ind(1), ie)
+      phys_state(lchnk)%phis(icol) = phis_tmp(blk_ind(1), ie)
+      do ilyr = 1, pver
+         phys_state(lchnk)%pdel(icol, ilyr)  = dp3d_tmp(blk_ind(1), ilyr, ie)
+         phys_state(lchnk)%t(icol, ilyr)     = T_tmp(blk_ind(1), ilyr, ie)
+         phys_state(lchnk)%u(icol, ilyr)     = uv_tmp(blk_ind(1), 1, ilyr, ie)
+         phys_state(lchnk)%v(icol, ilyr)     = uv_tmp(blk_ind(1), 2, ilyr, ie)
+         phys_state(lchnk)%omega(icol, ilyr) = omega_tmp(blk_ind(1), ilyr, ie)
+
+         if (use_gw_front .or. use_gw_front_igw) then
+            frontgf_phys(icol, ilyr, lchnk) = frontgf(blk_ind(1), ilyr, ie)
+            frontga_phys(icol, ilyr, lchnk) = frontga(blk_ind(1), ilyr, ie)
+         end if
+      end do
+
+      do m = 1, pcnst
+         do ilyr = 1, pver
+            phys_state(lchnk)%q(icol, ilyr,m) = Q_tmp(blk_ind(1), ilyr,m, ie)
+         end do
+      end do
+   end do
+   if (use_gw_front .or. use_gw_front_igw) then
+      !$omp parallel do num_threads(max_num_threads) private (lchnk, ncols, icol, ilyr, pbuf_chnk, pbuf_frontgf, pbuf_frontga)
+      do lchnk = begchunk, endchunk
+         ncols = get_ncols_p(lchnk)
+         pbuf_chnk => pbuf_get_chunk(pbuf2d, lchnk)
+         call pbuf_get_field(pbuf_chnk, frontgf_idx, pbuf_frontgf)
+         call pbuf_get_field(pbuf_chnk, frontga_idx, pbuf_frontga)
+         do icol = 1, ncols
+            do ilyr = 1, pver
+               pbuf_frontgf(icol, ilyr) = frontgf_phys(icol, ilyr, lchnk)
+               pbuf_frontga(icol, ilyr) = frontga_phys(icol, ilyr, lchnk)
+            end do
+         end do
+      end do
+      deallocate(frontgf_phys)
+      deallocate(frontga_phys)
+   end if
+
    call t_stopf('dpcopy')
 
    ! Save the tracer fields input to physics package for calculating tendencies
@@ -484,10 +381,10 @@ subroutine p_d_coupling(phys_state, phys_tend, dyn_in, tl_f, tl_qdp)
                   phys_state(lchnk)%q(icol,ilyr,m) = factor*phys_state(lchnk)%q(icol,ilyr,m)
                end if
             end do
-            call thermodynamic_consistency( &
-               phys_state(lchnk), phys_tend(lchnk), icol, ilyr, q_prev(icol,ilyr,1,lchnk))
-         end do
-      end do
+          end do
+        end do
+       call thermodynamic_consistency( &
+            phys_state(lchnk), phys_tend(lchnk), ncols, pver)
    end do
 
 
@@ -604,7 +501,7 @@ subroutine p_d_coupling(phys_state, phys_tend, dyn_in, tl_f, tl_qdp)
    end if
    call t_stopf('pd_copy')
 
-   
+
    if (iam < par%nprocs) then
 
       if (fv_nphys > 0) then
@@ -738,14 +635,17 @@ subroutine derived_phys_dry(phys_state, phys_tend, pbuf2d)
    ! Finally compute energy and water column integrals of the physics input state.
 
    use constituents,  only: qmin
-   use physconst,     only: cpair, gravit, rair, zvir, cappa, rairv,rh2o,rair
+   use physconst,     only: cpair, gravit, zvir, cappa, rairv, physconst_update
+   use shr_const_mod, only: shr_const_rwv
+   use phys_control,  only: waccmx_is
    use geopotential,  only: geopotential_t
    use physics_types, only: set_state_pdry, set_wet_to_dry
    use check_energy,  only: check_energy_timestep_init
-   use hycoef,        only: hyam, hybm, hyai, hybi, ps0
+   use hycoef,        only: hyai, hybi, ps0
    use shr_vmath_mod, only: shr_vmath_log
    use gmean_mod,     only: gmean
    use qneg_module,   only: qneg3
+   use dyn_comp,      only: ixo, ixo2, ixh, ixh2
 
    ! arguments
    type(physics_state), intent(inout), dimension(begchunk:endchunk) :: phys_state
@@ -766,6 +666,13 @@ subroutine derived_phys_dry(phys_state, phys_tend, pbuf2d)
    real(r8) :: factor_array(pcols,nlev)
 
    integer :: m, i, k, ncol
+
+   !--------------------------------------------
+   !  Variables needed for WACCM-X
+   !--------------------------------------------
+    real(r8) :: mmrSum_O_O2_H                ! Sum of mass mixing ratios for O, O2, and H
+    real(r8), parameter :: mmrMin=1.e-20_r8  ! lower limit of o2, o, and h mixing ratios
+    real(r8), parameter :: N2mmrMin=1.e-6_r8 ! lower limit of o2, o, and h mixing ratios
 
    type(physics_buffer_desc), pointer :: pbuf_chnk(:)
    !----------------------------------------------------------------------------
@@ -861,10 +768,50 @@ subroutine derived_phys_dry(phys_state, phys_tend, pbuf2d)
             end do
          end if
       end do
+      !------------------------------------------------------------
+      ! Ensure O2 + O + H (N2) mmr greater than one.
+      ! Check for unusually large H2 values and set to lower value.
+      !------------------------------------------------------------
+       if ( waccmx_is('ionosphere') .or. waccmx_is('neutral') ) then
 
+          do i=1,ncol
+             do k=1,pver
 
-      ! fill zvirv 2D variables to be compatible with geopotential_t interface
-      zvirv(:,:) = zvir
+                if (phys_state(lchnk)%q(i,k,ixo) < mmrMin) phys_state(lchnk)%q(i,k,ixo) = mmrMin
+                if (phys_state(lchnk)%q(i,k,ixo2) < mmrMin) phys_state(lchnk)%q(i,k,ixo2) = mmrMin
+
+                mmrSum_O_O2_H = phys_state(lchnk)%q(i,k,ixo)+phys_state(lchnk)%q(i,k,ixo2)+phys_state(lchnk)%q(i,k,ixh)
+
+                if ((1._r8-mmrMin-mmrSum_O_O2_H) < 0._r8) then
+
+                   phys_state(lchnk)%q(i,k,ixo) = phys_state(lchnk)%q(i,k,ixo) * (1._r8 - N2mmrMin) / mmrSum_O_O2_H
+
+                   phys_state(lchnk)%q(i,k,ixo2) = phys_state(lchnk)%q(i,k,ixo2) * (1._r8 - N2mmrMin) / mmrSum_O_O2_H
+
+                   phys_state(lchnk)%q(i,k,ixh) = phys_state(lchnk)%q(i,k,ixh) * (1._r8 - N2mmrMin) / mmrSum_O_O2_H
+
+                endif
+
+                if(phys_state(lchnk)%q(i,k,ixh2) .gt. 6.e-5_r8) then
+                   phys_state(lchnk)%q(i,k,ixh2) = 6.e-5_r8
+                endif
+
+             end do
+          end do
+       endif
+
+      !-----------------------------------------------------------------------------
+      ! Call physconst_update to compute cpairv, rairv, mbarv, and cappav as
+      ! constituent dependent variables.
+      ! Compute molecular viscosity(kmvis) and conductivity(kmcnd).
+      ! Fill local zvirv variable; calculated for WACCM-X.
+      !-----------------------------------------------------------------------------
+      if ( waccmx_is('ionosphere') .or. waccmx_is('neutral') ) then
+        call physconst_update(phys_state(lchnk)%q, phys_state(lchnk)%t, lchnk, ncol)
+        zvirv(:,:) = shr_const_rwv / rairv(:,:,lchnk) -1._r8
+      else
+        zvirv(:,:) = zvir
+      endif
 
       ! Compute initial geopotential heights - based on full pressure
       call geopotential_t (phys_state(lchnk)%lnpint, phys_state(lchnk)%lnpmid  , phys_state(lchnk)%pint  , &
@@ -905,46 +852,35 @@ end subroutine derived_phys_dry
 
 !=========================================================================================
 
-subroutine thermodynamic_consistency(phys_state, phys_tend, icol, ilyr, q_prev)
-
+subroutine thermodynamic_consistency(phys_state, phys_tend, ncols, pver)
+  !
    ! Adjust the physics temperature tendency for thermal energy consistency with the
    ! dynamics.
    ! Note: mixing ratios are assumed to be dry.
-   
-   use dimensions_mod,    only: qsize_condensate_loading,qsize_condensate_loading_idx
-   use dimensions_mod,    only: qsize_condensate_loading_cp, lcp_moist
+   !
+   use dimensions_mod,    only: lcp_moist
+   use physconst,         only: get_cp
    use control_mod,       only: phys_dyn_cp
    use physconst,         only: cpair
 
    type(physics_state), intent(in)    :: phys_state
-   type(physics_tend ), intent(inout) :: phys_tend  
-   integer,  intent(in)               :: icol,ilyr
-   real(r8), intent(in)               :: q_prev
-  
-   integer :: nq, m
-   real(r8):: facor, sum_water, sum_cp, factor
+   type(physics_tend ), intent(inout) :: phys_tend
+   integer,  intent(in)               :: ncols, pver
+
+   real(r8):: inv_cp(ncols,pver)
    !----------------------------------------------------------------------------
 
    if (lcp_moist.and.phys_dyn_cp==1) then
-     factor = 1.0_r8
-     sum_cp    = cpair
-     sum_water = 1.0_r8                    
-     do nq=1,qsize_condensate_loading
-       m = qsize_condensate_loading_idx(nq)
-       sum_cp  = sum_cp+qsize_condensate_loading_cp(nq)*phys_state%q(icol,ilyr,m)
-       sum_water = sum_water + phys_state%q(icol,ilyr,m)
-     end do
      !
      ! scale temperature tendency so that thermal energy increment from physics
      ! matches SE (not taking into account dme adjust)
      !
      ! note that if lcp_moist=.false. then there is thermal energy increment
-     ! consistency (not taking into account dme adjust) 
+     ! consistency (not taking into account dme adjust)
      !
-     !
-     factor = cpair*sum_water/sum_cp
-     phys_tend%dtdt(icol,ilyr) = phys_tend%dtdt(icol,ilyr)*factor
-   end if 
+     call get_cp(1,ncols,1,pver,1,1,pcnst,phys_state%q(1:ncols,1:pver,:),.true.,inv_cp)
+     phys_tend%dtdt(1:ncols,1:pver) = phys_tend%dtdt(1:ncols,1:pver)*cpair*inv_cp
+   end if
 end subroutine thermodynamic_consistency
 
 !=========================================================================================

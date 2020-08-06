@@ -137,22 +137,22 @@ CONTAINS
          end do
       end if
       ! If we get here, we should not have any allocated arrays, check.
-      if (allocated(column_reorder%dest_tasks)) then
+      if (associated(column_reorder%dest_tasks)) then
          call endrun(subname//'dest_tasks allocated (should not be)')
       end if
       if (associated(column_reorder%col_starts)) then
          call endrun(subname//'col_starts allocated (should not be)')
       end if
-      if (allocated(column_reorder%task_sizes)) then
+      if (associated(column_reorder%task_sizes)) then
          call endrun(subname//'task_sizes allocated (should not be)')
       end if
-      if (allocated(column_reorder%recv_cnts)) then
+      if (associated(column_reorder%recv_cnts)) then
          call endrun(subname//'recv_cnts allocated (should not be)')
       end if
-      if (allocated(column_reorder%recv_disps)) then
+      if (associated(column_reorder%recv_disps)) then
          call endrun(subname//'recv_disps allocated (should not be)')
       end if
-      if (allocated(column_reorder%recv_reorder)) then
+      if (associated(column_reorder%recv_reorder)) then
          call endrun(subname//'recv_reorder allocated (should not be)')
       end if
       allocate(column_reorder%dest_tasks(0:num_blocks-1))
@@ -171,7 +171,7 @@ CONTAINS
       else
          color = 2
       end if
-      if (size(column_reorder, 1) < npes) then
+      if (size(column_reorder%dest_tasks, 1) < npes) then
          call MPI_Comm_split(mpicom, color, iam, block_sum_comm)
       end if
       if (color /= 1) then
