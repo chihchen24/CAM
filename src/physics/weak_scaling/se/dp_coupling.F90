@@ -106,6 +106,10 @@ subroutine d_p_coupling(phys_state, phys_tend,  pbuf2d, dyn_out)
    type(physics_buffer_desc), pointer :: pbuf_chnk(:)
    !----------------------------------------------------------------------------
 
+   if (.not. local_dp_map) then
+      call endrun('d_p_coupling: Weak scaling does not support load balancing')
+   end if
+
    elem => dyn_out%elem
    tl_f = TimeLevel%n0
    call TimeLevel_Qdp(TimeLevel, qsplit, tl_qdp_np0,tl_qdp_np1)
@@ -220,18 +224,14 @@ subroutine d_p_coupling(phys_state, phys_tend,  pbuf2d, dyn_out)
    q_prev = 0.0_R8
 
    call t_startf('dpcopy')
-   if (.not. local_dp_map) then
-      call endrun('d_p_coupling: Weak scaling does not support load balancing')
-   end if
-
    if (use_gw_front .or. use_gw_front_igw) then
       allocate(frontgf_phys(pcols, pver, begchunk:endchunk))
       allocate(frontga_phys(pcols, pver, begchunk:endchunk))
    end if
-   !$omp parallel do num_threads(max_num_threads) private (col_ind, lchnk, ncols, icol, ie, blk_ind, ilyr, m, pbuf_chnk)
-   do col_ind = 1,
-      call get_dyn_col_p(col_index, ie, blk_ind)
-      call get_chunk_info_p(col_index, lchnk, icol)
+   !$omp parallel do num_threads(max_num_threads) private (col_ind, lchnk, icol, ie, blk_ind, ilyr, m)
+   do col_ind = 1, columns_on_task
+      call get_dyn_col_p(col_ind, ie, blk_ind)
+      call get_chunk_info_p(col_ind, lchnk, icol)
       phys_state(lchnk)%ps(icol)   = ps_tmp(blk_ind(1), ie)
       phys_state(lchnk)%phis(icol) = phis_tmp(blk_ind(1), ie)
       do ilyr = 1, pver
@@ -311,11 +311,12 @@ subroutine p_d_coupling(phys_state, phys_tend, dyn_in, tl_f, tl_qdp)
 
    ! Convert the physics output state into the dynamics input state.
 
-   use bndry_mod,              only: bndry_exchange
-   use edge_mod,               only: edgeVpack, edgeVunpack
-   use fvm_mapping,            only: phys2dyn_forcings_fvm
-   use test_fvm_mapping,       only: test_mapping_overwrite_tendencies
-   use test_fvm_mapping,       only: test_mapping_output_mapped_tendencies
+   use phys_grid,        only: get_dyn_col_p, columns_on_task, get_chunk_info_p
+   use bndry_mod,        only: bndry_exchange
+   use edge_mod,         only: edgeVpack, edgeVunpack
+   use fvm_mapping,      only: phys2dyn_forcings_fvm
+   use test_fvm_mapping, only: test_mapping_overwrite_tendencies
+   use test_fvm_mapping, only: test_mapping_output_mapped_tendencies
 
    ! arguments
    type(physics_state), intent(inout), dimension(begchunk:endchunk) :: phys_state
@@ -327,27 +328,27 @@ subroutine p_d_coupling(phys_state, phys_tend, dyn_in, tl_f, tl_qdp)
    ! LOCAL VARIABLES
    integer                      :: ic , ncols             ! index
    type(element_t), pointer     :: elem(:)                ! pointer to dyn_in element array
-   integer                      :: ie, iep                ! indices over elements
-   integer                      :: lchnk, icol, ilyr      ! indices over chunks, columns, layers
+   integer                      :: ie                     ! index for elements
+   integer                      :: col_ind                ! index over columns
+   integer                      :: blk_ind                ! element offset
+   integer                      :: lchnk, icol, ilyr      ! indices for chunk, column, layer
 
    real (kind=r8),  allocatable :: dp_phys(:,:,:)         ! temp array to hold dp on physics grid
    real (kind=r8),  allocatable :: T_tmp(:,:,:)           ! temp array to hold T
    real (kind=r8),  allocatable :: dq_tmp(:,:,:,:)        ! temp array to hold q
    real (kind=r8),  allocatable :: uv_tmp(:,:,:,:)        ! temp array to hold uv
-   integer                      :: ioff, m, i, j, k
-   integer                      :: pgcols(pcols), idmb1(1), idmb2(1), idmb3(1)
-
-   integer                      :: tsize                  ! amount of data per grid point passed to physics
-   integer                      :: cpter(pcols,0:pver)    ! offsets into chunk buffer for packing data
-   integer,         allocatable :: bpter(:,:)             ! offsets into block buffer for unpacking data
-
-   real (kind=r8),  allocatable :: bbuffer(:), cbuffer(:) ! transpose buffers
+   integer                      :: col_ind, m, i, j, k
 
    real (kind=r8)               :: factor
    integer                      :: num_trac
    integer                      :: nets, nete
    integer                      :: kptr, ii
    !----------------------------------------------------------------------------
+
+   if (.not. local_dp_map) then
+      call endrun('p_d_coupling: Weak scaling does not support load balancing')
+   end if
+
    if (iam < par%nprocs) then
       elem => dyn_in%elem
    else
@@ -381,124 +382,34 @@ subroutine p_d_coupling(phys_state, phys_tend, dyn_in, tl_f, tl_qdp)
                   phys_state(lchnk)%q(icol,ilyr,m) = factor*phys_state(lchnk)%q(icol,ilyr,m)
                end if
             end do
-          end do
-        end do
-       call thermodynamic_consistency( &
-            phys_state(lchnk), phys_tend(lchnk), ncols, pver)
+         end do
+      end do
+      call thermodynamic_consistency( &
+           phys_state(lchnk), phys_tend(lchnk), ncols, pver)
    end do
 
-
    call t_startf('pd_copy')
-   if (local_dp_map) then
+   !$omp parallel do num_threads(max_num_threads) private (col_ind, lchnk, icol, ie, blk_ind, ilyr, m)
+   do col_ind = 1, columns_on_task
+      call get_dyn_col_p(col_ind, ie, blk_ind)
+      call get_chunk_info_p(col_ind, lchnk, icol)
 
-      !$omp parallel do num_threads(max_num_threads) private (lchnk, ncols, pgcols, icol, idmb1, idmb2, idmb3, ie, ioff, ilyr, m)
-      do lchnk = begchunk, endchunk
-         ncols = get_ncols_p(lchnk)
-         call get_gcol_all_p(lchnk, pcols, pgcols)
+      ! test code -- does nothing unless cpp macro debug_coupling is defined.
+      call test_mapping_overwrite_tendencies(phys_state(lchnk),            &
+           phys_tend(lchnk), ncols, lchnk, q_prev(1:ncols,:,:,lchnk),      &
+           dyn_in%fvm)
 
-         ! test code -- does nothing unless cpp macro debug_coupling is defined.
-         call test_mapping_overwrite_tendencies(phys_state(lchnk), phys_tend(lchnk), ncols, &
-            lchnk, q_prev(1:ncols,:,:,lchnk), dyn_in%fvm)
-
-         do icol = 1, ncols
-            call get_gcol_block_d(pgcols(icol), 1, idmb1, idmb2, idmb3)
-            ie   = idmb3(1)
-            ioff = idmb2(1)
-
-            do ilyr = 1, pver
-               dp_phys(ioff,ilyr,ie)  = phys_state(lchnk)%pdeldry(icol,ilyr)
-               T_tmp(ioff,ilyr,ie)    = phys_tend(lchnk)%dtdt(icol,ilyr)
-               uv_tmp(ioff,1,ilyr,ie) = phys_tend(lchnk)%dudt(icol,ilyr)
-               uv_tmp(ioff,2,ilyr,ie) = phys_tend(lchnk)%dvdt(icol,ilyr)
-               do m = 1, pcnst
-                  dq_tmp(ioff,ilyr,m,ie) = (phys_state(lchnk)%q(icol,ilyr,m) - &
-                                            q_prev(icol,ilyr,m,lchnk))
-               end do
-            end do
+      do ilyr = 1, pver
+         dp_phys(blk_ind(1),ilyr,ie)  = phys_state(lchnk)%pdeldry(icol,ilyr)
+         T_tmp(blk_ind(1),ilyr,ie)    = phys_tend(lchnk)%dtdt(icol,ilyr)
+         uv_tmp(blk_ind(1),1,ilyr,ie) = phys_tend(lchnk)%dudt(icol,ilyr)
+         uv_tmp(blk_ind(1),2,ilyr,ie) = phys_tend(lchnk)%dvdt(icol,ilyr)
+         do m = 1, pcnst
+            dq_tmp(blk_ind(1),ilyr,m,ie) =                                    &
+                 (phys_state(lchnk)%q(icol,ilyr,m) - q_prev(icol,ilyr,m,lchnk))
          end do
       end do
-
-   else  ! not local map
-
-      tsize = 4 + pcnst
-
-      allocate(bbuffer(tsize*block_buf_nrecs))
-      allocate(cbuffer(tsize*chunk_buf_nrecs))
-
-      !$omp parallel do num_threads(max_num_threads) private (lchnk, ncols, cpter, i, icol, ilyr, m)
-      do lchnk = begchunk, endchunk
-         ncols = get_ncols_p(lchnk)
-
-         call test_mapping_overwrite_tendencies(phys_state(lchnk), phys_tend(lchnk), ncols, lchnk, &
-                                                q_prev(1:ncols,:,:,lchnk), dyn_in%fvm)
-
-         call chunk_to_block_send_pters(lchnk, pcols, pver+1, tsize, cpter)
-
-         do i = 1, ncols
-            cbuffer(cpter(i,0):cpter(i,0)+2+pcnst) = 0.0_r8
-         end do
-
-         do icol = 1, ncols
-            do ilyr = 1, pver
-               cbuffer(cpter(icol,ilyr))   = phys_tend(lchnk)%dtdt(icol,ilyr)
-               cbuffer(cpter(icol,ilyr)+1) = phys_tend(lchnk)%dudt(icol,ilyr)
-               cbuffer(cpter(icol,ilyr)+2) = phys_tend(lchnk)%dvdt(icol,ilyr)
-               cbuffer(cpter(icol,ilyr)+3) = phys_state(lchnk)%pdeldry(icol,ilyr)
-               do m = 1, pcnst
-                  cbuffer(cpter(icol,ilyr)+3+m) = (phys_state(lchnk)%q(icol,ilyr,m) - &
-                                                   q_prev(icol,ilyr,m,lchnk))
-                end do
-            end do
-          end do
-      end do
-
-      call t_barrierf('sync_chk_to_blk', mpicom)
-      call t_startf ('chunk_to_block')
-      call transpose_chunk_to_block(tsize, cbuffer, bbuffer)
-      call t_stopf  ('chunk_to_block')
-
-      if (iam < par%nprocs) then
-
-         if (fv_nphys > 0) then
-            allocate(bpter(fv_nphys*fv_nphys,0:pver))
-         else
-            allocate(bpter(npsq,0:pver))
-         end if
-
-         !$omp parallel do num_threads(max_num_threads) private (ie, bpter, icol, ilyr, m, ncols)
-         do ie = 1, nelemd
-
-            if (fv_nphys > 0) then
-               call chunk_to_block_recv_pters(elem(ie)%GlobalID, fv_nphys*fv_nphys, &
-                                              pver+1, tsize, bpter)
-               ncols = fv_nphys*fv_nphys
-            else
-               call chunk_to_block_recv_pters(elem(ie)%GlobalID, npsq, &
-                                              pver+1, tsize, bpter)
-               ncols = elem(ie)%idxP%NumUniquePts
-            end if
-
-            do icol = 1, ncols
-               do ilyr = 1, pver
-                  T_tmp   (icol,ilyr,ie)   = bbuffer(bpter(icol,ilyr))
-                  uv_tmp  (icol,1,ilyr,ie) = bbuffer(bpter(icol,ilyr)+1)
-                  uv_tmp  (icol,2,ilyr,ie) = bbuffer(bpter(icol,ilyr)+2)
-                  dp_phys (icol,ilyr,ie)   = bbuffer(bpter(icol,ilyr)+3)
-
-                  do m = 1, pcnst
-                     dq_tmp(icol,ilyr,m,ie) = bbuffer(bpter(icol,ilyr)+3+m)
-                  end do
-               end do
-            end do
-         end do
-         deallocate(bpter)
-
-      end if
-
-      deallocate( bbuffer )
-      deallocate( cbuffer )
-
-   end if
+   end do
    call t_stopf('pd_copy')
 
 

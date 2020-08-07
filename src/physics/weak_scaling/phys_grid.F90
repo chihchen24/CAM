@@ -68,6 +68,9 @@ module phys_grid
       module procedure :: get_dyn_col_p_index
    end interface get_dyn_col_p
 
+   ! Private interfaces
+   private :: chunk_info_to_index_p
+
    ! These variables are last to provide a limited table to search
 
    !> \section arg_table_physics_grid  Argument Table
@@ -362,6 +365,52 @@ CONTAINS
 
    !========================================================================
 
+   integer function chunk_info_to_index_p(lcid, col, subname_in)
+      use cam_logfile,    only: iulog
+      use cam_abortutils, only: endrun
+      ! Return the physics column index indicated by
+      ! <lcid> (chunk) and <col> (column).
+
+      ! Dummy arguments
+      integer,                    intent(in) :: lcid ! local chunk id
+      integer,                    intent(in) :: col  ! Column index
+      character(len=*), optional, intent(in) :: subname_in
+      ! Local variables
+      character(len=128)          :: errmsg
+      character(len=*), parameter :: subname = 'chunk_info_to_index_p: '
+
+      if (.not. phys_grid_initialized) then
+         if (present(subname_in)) then
+            call endrun(trim(subname_in)//'physics grid not initialized')
+         else
+            call endrun(subname//'physics grid not initialized')
+         end if
+      else if ((lcid < begchunk) .or. (lcid > endchunk)) then
+         if (present(subname_in)) then
+            write(errmsg, '(a,3(a,i0))') trim(subname_in), 'lcid (', lcid,    &
+                 ') out of range (', begchunk, ' to ', endchunk
+         else
+            write(errmsg, '(a,3(a,i0))') subname, 'lcid (', lcid,             &
+                 ') out of range (', begchunk, ' to ', endchunk
+         end if
+         write(iulog, *) trim(errmsg)
+         call endrun(trim(errmsg))
+      else if ((col < 1) .or. (col > get_ncols_p(lcid))) then
+         if (present(subname_in)) then
+            write(errmsg, '(a,2(a,i0))') trim(subname_in), 'col (', col,      &
+                 ') out of range (1 to ', get_ncols_p(lcid)
+         else
+            write(errmsg, '(a,2(a,i0))') subname, 'col (', col,               &
+                 ') out of range (1 to ', get_ncols_p(lcid)
+         end if
+         write(iulog, *) trim(errmsg)
+         call endrun(trim(errmsg))
+      end if
+      chunk_info_to_index_p = chunks(lcid)%phys_col_start + col - 1
+   end function chunk_info_to_index_p
+
+   !========================================================================
+
    real(r8) function get_dlat_p(index)
       use cam_logfile,    only: iulog
       use cam_abortutils, only: endrun
@@ -414,9 +463,7 @@ CONTAINS
 
    !========================================================================
 
-   real(r8) function get_rlat_p(index)
-      use cam_logfile,    only: iulog
-      use cam_abortutils, only: endrun
+   real(r8) function get_rlat_p(lcid, col)
       !-----------------------------------------------------------------------
       !
       ! get_rlat_p: latitude of a physics column in radians
@@ -424,29 +471,20 @@ CONTAINS
       !-----------------------------------------------------------------------
 
       ! Dummy argument
-      integer, intent(in) :: index
+      integer, intent(in) :: lcid
+      integer, intent(in) :: col
       ! Local variables
-      character(len=128)          :: errmsg
+      integer                     :: index
       character(len=*), parameter :: subname = 'get_rlat_p'
 
-      if (.not. phys_grid_initialized) then
-         call endrun(subname//': physics grid not initialized')
-      else if ((index < 1) .or. (index > columns_on_task)) then
-         write(errmsg, '(a,2(a,i0))') subname, ': index (', index,            &
-              ') out of range (1 to ', columns_on_task
-         write(iulog, *) errmsg
-         call endrun(errmsg)
-      else
-         get_rlat_p = phys_columns(index)%lat_rad
-      end if
+      index = chunk_info_to_index_p(lcid, col, subname_in=subname)
+      get_rlat_p = phys_columns(index)%lat_rad
 
    end function get_rlat_p
 
    !========================================================================
 
-   real(r8) function get_rlon_p(index)
-      use cam_logfile,    only: iulog
-      use cam_abortutils, only: endrun
+   real(r8) function get_rlon_p(lcid, col)
       !-----------------------------------------------------------------------
       !
       ! get_rlon_p: longitude of a physics column in radians
@@ -454,21 +492,14 @@ CONTAINS
       !-----------------------------------------------------------------------
 
       ! Dummy argument
-      integer, intent(in) :: index
+      integer, intent(in) :: lcid
+      integer, intent(in) :: col
       ! Local variables
-      character(len=128)          :: errmsg
+      integer                     :: index
       character(len=*), parameter :: subname = 'get_rlon_p'
 
-      if (.not. phys_grid_initialized) then
-         call endrun(subname//': physics grid not initialized')
-      else if ((index < 1) .or. (index > columns_on_task)) then
-         write(errmsg, '(a,2(a,i0))') subname, ': index (', index,            &
-              ') out of range (1 to ', columns_on_task
-         write(iulog, *) errmsg
-         call endrun(errmsg)
-      else
-         get_rlon_p = phys_columns(index)%lon_rad
-      end if
+      index = chunk_info_to_index_p(lcid, col, subname_in=subname)
+      get_rlon_p = phys_columns(index)%lon_rad
 
    end function get_rlon_p
 
@@ -619,32 +650,17 @@ CONTAINS
       ! Local variables
       integer                     :: index
       integer                     :: off_size
-      character(len=128)          :: errmsg
       character(len=*), parameter :: subname = 'get_dyn_col_p_chunk: '
 
-      if (.not. phys_grid_initialized) then
-         call endrun(subname//'physics grid not initialized')
-      else if ((lcid < begchunk) .or. (lcid > endchunk)) then
-         write(errmsg, '(a,3(a,i0))') subname, 'lcid (', lcid,                &
-              ') out of range (', begchunk, ' to ', endchunk
-         write(iulog, *) trim(errmsg)
-         call endrun(trim(errmsg))
-      else if ((col < 1) .or. (col > get_ncols_p(lcid))) then
-         write(errmsg, '(a,2(a,i0))') subname, 'col (', col,                  &
-              ') out of range (1 to ', get_ncols_p(lcid)
-         write(iulog, *) trim(errmsg)
-         call endrun(trim(errmsg))
-      else
-         index = chunks(lcid)%phys_col_start + col - 1
-         off_size = SIZE(phys_columns(index)%dyn_block_index, 1)
-         if (SIZE(blk_ind, 1) < off_size) then
-            call endrun(subname//'blk_ind too small')
-         end if
-         blk_num = phys_columns(index)%local_dyn_block
-         blk_ind(1:off_size) = phys_columns(index)%dyn_block_index(1:off_size)
-         if (SIZE(blk_ind, 1) > off_size) then
-            blk_ind(off_size+1:) = -1
-         end if
+      index = chunk_info_to_index_p(lcid, col)
+      off_size = SIZE(phys_columns(index)%dyn_block_index, 1)
+      if (SIZE(blk_ind, 1) < off_size) then
+         call endrun(subname//'blk_ind too small')
+      end if
+      blk_num = phys_columns(index)%local_dyn_block
+      blk_ind(1:off_size) = phys_columns(index)%dyn_block_index(1:off_size)
+      if (SIZE(blk_ind, 1) > off_size) then
+         blk_ind(off_size+1:) = -1
       end if
 
    end subroutine get_dyn_col_p_chunk

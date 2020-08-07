@@ -40,7 +40,7 @@ module polar_avg
 !
    subroutine polar_average2d(field)
       use cam_abortutils, only: endrun
-      use phys_grid,      only: begchunk, endchunk, pcols
+      use ppgrid,      only: begchunk, endchunk, pcols
 !-----------------------------------------------------------------------
 ! Purpose: Set the collocated pole points at the limits of the latitude
 !          dimension to the same value.
@@ -61,7 +61,7 @@ module polar_avg
 
    subroutine polar_average3d(nlev, field)
       use cam_abortutils, only: endrun
-      use phys_grid,      only: begchunk, endchunk, pcols
+      use ppgrid,      only: begchunk, endchunk, pcols
 !-----------------------------------------------------------------------
 ! Purpose: Set the collocated pole points at the limits of the latitude
 !          dimension to the same value.
