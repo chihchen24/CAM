@@ -10,7 +10,7 @@ use constituents,   only: pcnst, cnst_type
 
 use spmd_dyn,       only: local_dp_map, block_buf_nrecs, chunk_buf_nrecs
 use spmd_utils,     only: mpicom, iam
-use dyn_grid,       only: get_gcol_block_d, TimeLevel, edgebuf
+use dyn_grid,       only: TimeLevel, edgebuf
 use dyn_comp,       only: dyn_export_t, dyn_import_t
 
 use physics_types,  only: physics_state, physics_tend
@@ -91,7 +91,7 @@ subroutine d_p_coupling(phys_state, phys_tend,  pbuf2d, dyn_out)
    real (kind=r8),  pointer     :: pbuf_frontga(:,:)
 
    integer                      :: ncols,i,j,ierr,k,iv
-   integer                      :: col_ind, blk_ind, m, m_cnst
+   integer                      :: col_ind, blk_ind(1), m, m_cnst
    integer                      :: tsize               ! amount of data per grid point passed to physics
    integer,         allocatable :: bpter(:,:)          ! offsets into block buffer for packing data
    integer                      :: cpter(pcols,0:pver) ! offsets into chunk buffer for unpacking data
@@ -330,14 +330,14 @@ subroutine p_d_coupling(phys_state, phys_tend, dyn_in, tl_f, tl_qdp)
    type(element_t), pointer     :: elem(:)                ! pointer to dyn_in element array
    integer                      :: ie                     ! index for elements
    integer                      :: col_ind                ! index over columns
-   integer                      :: blk_ind                ! element offset
+   integer                      :: blk_ind(1)             ! element offset
    integer                      :: lchnk, icol, ilyr      ! indices for chunk, column, layer
 
    real (kind=r8),  allocatable :: dp_phys(:,:,:)         ! temp array to hold dp on physics grid
    real (kind=r8),  allocatable :: T_tmp(:,:,:)           ! temp array to hold T
    real (kind=r8),  allocatable :: dq_tmp(:,:,:,:)        ! temp array to hold q
    real (kind=r8),  allocatable :: uv_tmp(:,:,:,:)        ! temp array to hold uv
-   integer                      :: col_ind, m, i, j, k
+   integer                      :: m, i, j, k
 
    real (kind=r8)               :: factor
    integer                      :: num_trac

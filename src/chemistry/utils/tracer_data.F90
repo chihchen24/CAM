@@ -1396,7 +1396,8 @@ contains
 
   subroutine read_za_trc( fid, vid, loc_arr, strt, cnt, file, order )
     use interpolate_data, only : lininterp_init, lininterp, interp_type, lininterp_finish
-    use phys_grid,        only : pcols, begchunk, endchunk, get_ncols_p, get_rlat_all_p
+    use ppgrid,           only : pcols, begchunk, endchunk
+    use phys_grid,        only : get_ncols_p, get_rlat_all_p
 
     implicit none
     type(file_desc_t), intent(in) :: fid
@@ -1524,7 +1525,8 @@ contains
 
   subroutine read_3d_trc( fid, vid, loc_arr, strt, cnt, file, order)
     use interpolate_data, only : lininterp_init, lininterp, interp_type, lininterp_finish
-    use phys_grid,        only : pcols, begchunk, endchunk, get_ncols_p, get_rlat_all_p, get_rlon_all_p, get_lon_all_p,&
+    use ppgrid,           only : pcols, begchunk, endchunk
+    use phys_grid,        only : get_ncols_p, get_rlat_all_p, get_rlon_all_p, get_lon_all_p,&
                                  get_lat_all_p
     use mo_constants,     only : pi
     use dycore,           only : dycore_is

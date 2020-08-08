@@ -85,6 +85,11 @@ public :: get_dyn_grid_parm
 !!XXgoldyXX: ^ try to remove?
 public :: dyn_grid_get_elem_coords ! get coords of a specified block element
 
+!!XXgoldyXX: v MUST BE DELETED
+public :: get_horiz_grid_d
+public :: get_dyn_grid_parm_real1d
+!!XXgoldyXX: ^ MUST BE DELETED
+
 !!XXgoldyXX: v delete?
 !   get_block_bounds_d,       & ! get first and last indices in global block ordering
 !   get_block_gcol_d,         & ! get column indices for given block
@@ -96,7 +101,6 @@ public :: dyn_grid_get_elem_coords ! get coords of a specified block element
                                ! index for given global column index
 !   get_gcol_block_cnt_d,     & ! get number of blocks containing data
                                ! from a given global column index
-!   get_dyn_grid_parm_real1d, &
 !!XXgoldyXX: ^ delete?
 
 ! Namelist variables controlling grid writing.
@@ -284,7 +288,7 @@ subroutine dyn_grid_init()
 
       allocate(areaA(ngcols_d))
       allocate(clat(ngcols_d),clon(ngcols_d))
-      call get_horiz_grid_d(ngcols_d, clat_d_out=clat, clon_d_out=clon, area_d_out=areaA)
+      call get_horiz_grid_int(ngcols_d, clat_d_out=clat, clon_d_out=clon, area_d_out=areaA)
 
       ! Create mapping files using SE basis functions
       call create_native_mapping_files(par, elem, 'native', ngcols_d, clat, clon, areaa)
@@ -728,8 +732,8 @@ end subroutine get_horiz_grid_dim_d
 
 !=========================================================================================
 
-subroutine get_horiz_grid_d(nxy, clat_d_out, clon_d_out, area_d_out, &
-                            wght_d_out, lat_d_out, lon_d_out)
+subroutine get_horiz_grid_int(nxy, clat_d_out, clon_d_out, area_d_out, &
+     wght_d_out, lat_d_out, lon_d_out)
 
    ! Return global arrays of latitude and longitude (in radians), column
    ! surface area (in radians squared) and surface integration weights for
@@ -818,7 +822,7 @@ subroutine get_horiz_grid_d(nxy, clat_d_out, clon_d_out, area_d_out, &
 
    end if
 
-end subroutine get_horiz_grid_d
+end subroutine get_horiz_grid_int
 
 !=========================================================================================
 
@@ -849,27 +853,6 @@ subroutine physgrid_copy_attributes_d(gridname, grid_attribute_names)
    end if
 
 end subroutine physgrid_copy_attributes_d
-
-!=========================================================================================
-
-function get_dyn_grid_parm_real1d(name) result(rval)
-
-   ! This routine is not used for SE, but still needed as a dummy interface to satisfy
-   ! references from mo_synoz.F90 and phys_gmean.F90
-
-   character(len=*), intent(in) :: name
-   real(r8), pointer :: rval(:)
-
-   if(name.eq.'w') then
-      call endrun('get_dyn_grid_parm_real1d: w not defined')
-   else if(name.eq.'clat') then
-      call endrun('get_dyn_grid_parm_real1d: clat not supported, use get_horiz_grid_d')
-   else if(name.eq.'latdeg') then
-      call endrun('get_dyn_grid_parm_real1d: latdeg not defined')
-   else
-      nullify(rval)
-   end if
-end function get_dyn_grid_parm_real1d
 
 !=========================================================================================
 
@@ -1603,6 +1586,55 @@ subroutine create_global_coords(clat, clon, lat_out, lon_out)
 
 end subroutine create_global_coords
 
-!=========================================================================================
+!=============================================================================
+!==
+!!!!!! DUMMY INTERFACE TO TEST WEAK SCALING FIX, THIS SHOULD GO AWAY
+!==
+!=============================================================================
+
+subroutine get_horiz_grid_d(nxy, clat_d_out, clon_d_out, area_d_out, &
+                            wght_d_out, lat_d_out, lon_d_out)
+
+   ! Return global arrays of latitude and longitude (in radians), column
+   ! surface area (in radians squared) and surface integration weights for
+   ! global column indices that will be passed to/from physics
+
+   ! arguments
+   integer, intent(in)   :: nxy                     ! array sizes
+
+   real(r8), intent(out),         optional :: clat_d_out(:) ! column latitudes
+   real(r8), intent(out),         optional :: clon_d_out(:) ! column longitudes
+   real(r8), intent(out), target, optional :: area_d_out(:) ! column surface
+
+   real(r8), intent(out), target, optional :: wght_d_out(:) ! column integration weight
+   real(r8), intent(out),         optional :: lat_d_out(:)  ! column degree latitudes
+   real(r8), intent(out),         optional :: lon_d_out(:)  ! column degree longitudes
+   character(len=*), parameter :: subname = 'get_horiz_grid_d'
+
+   call endrun(subname//': NOT SUPPORTED WITH WEAK SCALING FIX')
+end subroutine get_horiz_grid_d
+
+!==============================================================================
+
+function get_dyn_grid_parm_real1d(name) result(rval)
+
+   ! This routine is not used for SE, but still needed as a dummy interface to satisfy
+   ! references from mo_synoz.F90
+
+   character(len=*), intent(in) :: name
+   real(r8), pointer :: rval(:)
+
+   if(name.eq.'w') then
+      call endrun('get_dyn_grid_parm_real1d: w not defined')
+   else if(name.eq.'clat') then
+      call endrun('get_dyn_grid_parm_real1d: clat not supported, use get_horiz_grid_d')
+   else if(name.eq.'latdeg') then
+      call endrun('get_dyn_grid_parm_real1d: latdeg not defined')
+   else
+      nullify(rval)
+   end if
+end function get_dyn_grid_parm_real1d
+
+!==============================================================================
 
 end module dyn_grid

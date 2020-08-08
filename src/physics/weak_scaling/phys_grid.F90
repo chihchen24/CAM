@@ -8,11 +8,24 @@ module phys_grid
    private
    save
 
+!!XXgoldyXX: v MUST BE DELETED FOR WEAK SCALING
+   public :: SCATTER_FIELD_TO_CHUNK
+   public :: GET_LAT_ALL_P
+   public :: GET_LON_ALL_P
+   public :: GET_LAT_P
+   public :: GET_LON_P
+   integer, parameter, public :: ngcols_p = -HUGE(1)
+!!XXgoldyXX: ^ MUST BE DELETED FOR WEAK SCALING
+!!XXgoldyXX: v SHOULD BE DELETED ONCE WEAK SCALING IS COMPLETE
+   integer, public, protected :: ngcols = -HUGE(1)
+!!XXgoldyXX: ^ SHOULD BE DELETED ONCE WEAK SCALING IS COMPLETE
+
    ! Physics grid management
    public :: phys_grid_init     ! initialize the physics grid
    public :: phys_grid_readnl   ! Read the phys_grid_nl namelist
    public :: phys_grid_initialized
    ! Local task interfaces
+   public :: get_nlcols_p       ! Number of local columns
    public :: get_dlat_p         ! latitude of a physics column in degrees
    public :: get_dlon_p         ! longitude of a physics column in degrees
    public :: get_rlat_p         ! latitude of a physics column in radians
@@ -39,15 +52,14 @@ module phys_grid
    ! The identifier for the physics grid
    integer, parameter, public          :: phys_decomp = 100
 
-   ! dynamics field grid information
-   ! hdim1_d and hdim2_d are dimensions of rectangular horizontal grid
-   ! data structure, If 1D data structure, then hdim2_d == 1.
-   integer                             :: hdim1_d, hdim2_d
    ! Dycore name and properties
    character(len=8), protected, public :: dycore_name = ''
 
-   ! Physics decomposition information
-   type(physics_column_t), pointer     :: phys_columns(:) => NULL()
+   ! Max number of double-precision fields on a task for global calculations
+   ! A value of -1 signifies no limit.
+   integer,     protected, public :: phys_global_max_fields = -1
+
+   !! PUBLIC TYPES
 
    ! Physics chunking (thread blocking) data
    ! Note that chunks cover local data
@@ -58,15 +70,21 @@ module phys_grid
       integer, private :: phys_col_end   = -1  ! Last physics column in chunk
    end type chunk
 
+   !! PRIVATE DATA
+
+   ! dynamics field grid information
+   ! hdim1_d and hdim2_d are dimensions of rectangular horizontal grid
+   ! data structure, If 1D data structure, then hdim2_d == 1.
+   integer                             :: hdim1_d, hdim2_d
+
+   ! Physics decomposition information
+   type(physics_column_t), pointer     :: phys_columns(:) => NULL()
+
    integer,     private          :: begchunk = 0
    integer,     private          :: endchunk = -1
    type(chunk), private, pointer :: chunks(:) => NULL() ! (begchunk:endchunk)
 
    logical                       :: phys_grid_set = .false.
-
-   ! Max number of double-precision fields on a task for global calculations
-   ! A value of -1 signifies no limit.
-   integer,     protected, public :: phys_global_max_fields = -1
 
    interface get_dyn_col_p
       module procedure :: get_dyn_col_p_chunk
@@ -95,6 +113,7 @@ CONTAINS
 !==============================================================================
 
    subroutine phys_grid_readnl(nlfile)
+      use cam_abortutils, only: endrun
       use namelist_utils,  only: find_group_name
       use cam_logfile,     only: iulog
       use spmd_utils,      only: mpicom, mstrid=>masterprocid, masterproc
@@ -421,6 +440,12 @@ CONTAINS
       ! Return .true. if the physics grid is initialized, otherwise .false.
       phys_grid_initialized = phys_grid_set
    end function phys_grid_initialized
+
+   !========================================================================
+
+   integer function get_nlcols_p()
+      get_nlcols_p = columns_on_task
+   end function get_nlcols_p
 
    !========================================================================
 
@@ -885,8 +910,9 @@ CONTAINS
    !========================================================================
 
    subroutine init_col_assem_p(column_reorder)
-      use spmd_utils,      only: masterproc, column_redist_t
-      use cam_logfile,     only: iulog
+      use cam_abortutils, only: endrun
+      use spmd_utils,     only: masterproc, column_redist_t
+      use cam_logfile,    only: iulog
       !-----------------------------------------------------------------------
       !
       ! init_col_assem_p: Initialize data needed to perform global sums
@@ -1060,5 +1086,99 @@ CONTAINS
          end do
       end do
    end subroutine weighted_field_p
+
+!=============================================================================
+!==
+!!!!!! DUMMY INTERFACE TO TEST WEAK SCALING FIX, THIS SHOULD GO AWAY
+!==
+!=============================================================================
+
+   subroutine scatter_field_to_chunk(fdim,mdim,ldim, &
+                                     hdim1d,globalfield,localchunks)
+      use cam_abortutils, only: endrun
+      use ppgrid, only: pcols
+      !-----------------------------------------------------------------------
+      !
+      ! Purpose: DUMMY FOR WEAK SCALING TESTS
+      !
+      !------------------------------Arguments--------------------------------
+      integer, intent(in) :: fdim      ! declared length of first dimension
+      integer, intent(in) :: mdim      ! declared length of middle dimension
+      integer, intent(in) :: ldim      ! declared length of last dimension
+      integer, intent(in) :: hdim1d    ! declared first horizontal index
+      real(r8), intent(in) :: globalfield(fdim,hdim1d,mdim,hdim2_d,ldim)
+      real(r8), intent(out):: localchunks(fdim,pcols,mdim, &
+           begchunk:endchunk,ldim)
+
+      call endrun('scatter_field_to_chunk: NOT SUPPORTED WITH WEAK SCALING')
+   end subroutine scatter_field_to_chunk
+
+   subroutine get_lat_all_p(lcid, latdim, lats)
+      use cam_abortutils, only: endrun
+      !------------------------------Arguments--------------------------------
+      integer, intent(in)  :: lcid          ! local chunk id
+      integer, intent(in)  :: latdim        ! declared size of output array
+
+      integer, intent(out) :: lats(latdim)  ! array of global latitude indices
+      !-----------------------------------------------------------------------
+      !
+      ! Purpose: DUMMY FOR WEAK SCALING TESTS
+      !
+      !------------------------------Arguments--------------------------------
+      call endrun('get_lat_all_p: NOT SUPPORTED WITH WEAK SCALING')
+   end subroutine get_lat_all_p
+
+   subroutine get_lon_all_p(lcid, londim, lons)
+      use cam_abortutils, only: endrun
+      !------------------------------Arguments--------------------------------
+      integer, intent(in)  :: lcid
+      integer, intent(in)  :: londim
+
+      integer, intent(out) :: lons(londim)
+      !-----------------------------------------------------------------------
+      !
+      ! Purpose: DUMMY FOR WEAK SCALING TESTS
+      !
+      !------------------------------Arguments--------------------------------
+      call endrun('get_lon_all_p: NOT SUPPORTED WITH WEAK SCALING')
+   end subroutine get_lon_all_p
+
+   !========================================================================
+
+   integer function get_lat_p(lcid, col)
+      use cam_abortutils, only: endrun
+      !-----------------------------------------------------------------------
+      !
+      ! Purpose: DUMMY FOR WEAK SCALING TESTS
+      !
+      !------------------------------Arguments--------------------------------
+
+      !------------------------------Arguments--------------------------------
+      integer, intent(in)  :: lcid          ! local chunk id
+      integer, intent(in)  :: col           ! column index
+
+      call endrun('get_lat_p: NOT SUPPORTED WITH WEAK SCALING')
+
+   end function get_lat_p
+
+   !========================================================================
+
+   integer function get_lon_p(lcid, col)
+      use cam_abortutils, only: endrun
+      !-----------------------------------------------------------------------
+      !
+      ! Purpose: DUMMY FOR WEAK SCALING TESTS
+      !
+      !------------------------------Arguments--------------------------------
+
+      !------------------------------Arguments--------------------------------
+      integer, intent(in)  :: lcid          ! local chunk id
+      integer, intent(in)  :: col           ! column index
+
+      call endrun('get_lon_p: NOT SUPPORTED WITH WEAK SCALING')
+
+   end function get_lon_p
+
+   !========================================================================
 
 end module phys_grid
