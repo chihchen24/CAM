@@ -1283,7 +1283,7 @@ contains
   subroutine read_2d_trc( fid, vid, loc_arr, strt, cnt, file, order )
     use interpolate_data,  only : lininterp_init, lininterp, interp_type, lininterp_finish
 
-    use phys_grid,    only : get_ncols_p, get_rlat_all_p, get_rlon_all_p, get_lon_all_p, get_lat_all_p
+    use phys_grid,    only : get_ncols_p, get_rlat_all_p, get_rlon_all_p
     use mo_constants, only : pi
     use dycore,       only: dycore_is
     use polar_avg,    only: polar_average
@@ -1296,107 +1296,15 @@ contains
     real(r8),intent(out)  :: loc_arr(:,:)
     type (trfile), intent(in) :: file
 
-    real(r8) :: to_lats(pcols), to_lons(pcols)
-    real(r8), allocatable, target :: wrk2d(:,:)
-    real(r8), pointer :: wrk2d_in(:,:)
+    call endrun('read_2d_trc: Not supported with weak scaling fix')
 
-    integer :: c, ierr, ncols
-    real(r8), parameter :: zero=0_r8, twopi=2_r8*pi
-    type(interp_type) :: lon_wgts, lat_wgts
-    integer :: lons(pcols), lats(pcols)
-    real(r8) :: file_lats(file%nlat)
-
-     nullify(wrk2d_in)
-     allocate( wrk2d(cnt(1),cnt(2)), stat=ierr )
-     if( ierr /= 0 ) then
-        write(iulog,*) 'read_2d_trc: wrk2d allocation error = ',ierr
-        call endrun
-     end if
-
-     if(order(1)/=1 .or. order(2)/=2 .or. cnt(1)/=file%nlon .or. cnt(2)/=file%nlat) then
-        allocate( wrk2d_in(file%nlon, file%nlat), stat=ierr )
-        if( ierr /= 0 ) then
-           write(iulog,*) 'read_2d_trc: wrk2d_in allocation error = ',ierr
-           call endrun
-        end if
-     end if
-
-
-    ierr = pio_get_var( fid, vid, strt, cnt, wrk2d )
-    if(associated(wrk2d_in)) then
-       wrk2d_in = reshape( wrk2d(:,:),(/file%nlon,file%nlat/), order=order )
-       deallocate(wrk2d)
-    else
-       wrk2d_in => wrk2d
-    end if
-
-    ! PGI 13.9 bug workaround.
-    file_lats = file%lats
-
-    ! For zonal average, only interpolate along latitude.
-    if (file%zonal_ave) then
-
-       do c=begchunk,endchunk
-          ncols = get_ncols_p(c)
-          call get_rlat_all_p(c, pcols, to_lats)
-
-          call lininterp_init(file_lats, file%nlat, to_lats, ncols, 1, lat_wgts)
-
-          call lininterp(wrk2d_in(1,:), file%nlat, loc_arr(1:ncols,c-begchunk+1), ncols, lat_wgts)
-
-          call lininterp_finish(lat_wgts)
-       end do
-
-    else
-       ! if weighting by latitude, the perform horizontal interpolation by using weight_x, weight_y
-
-       if(file%weight_by_lat) then
-
-          call t_startf('xy_interp')
-
-          do c = begchunk,endchunk
-             ncols = get_ncols_p(c)
-             call get_lon_all_p(c,ncols,lons)
-             call get_lat_all_p(c,ncols,lats)
-
-             call xy_interp(file%nlon,file%nlat,1,plon,plat,pcols,ncols, &
-                  file%weight_x,file%weight_y,wrk2d_in,loc_arr(:,c-begchunk+1), &
-                  lons,lats,file%count_x,file%count_y,file%index_x,file%index_y)
-          enddo
-
-          call t_stopf('xy_interp')
-
-       else
-          do c=begchunk,endchunk
-             ncols = get_ncols_p(c)
-             call get_rlat_all_p(c, pcols, to_lats)
-             call get_rlon_all_p(c, pcols, to_lons)
-
-             call lininterp_init(file%lons, file%nlon, to_lons, ncols, 2, lon_wgts, zero, twopi)
-             call lininterp_init(file%lats, file%nlat, to_lats, ncols, 1, lat_wgts)
-
-             call lininterp(wrk2d_in, file%nlon, file%nlat, loc_arr(1:ncols,c-begchunk+1), ncols, lon_wgts, lat_wgts)
-
-             call lininterp_finish(lon_wgts)
-             call lininterp_finish(lat_wgts)
-          end do
-       endif
-
-    end if
-
-    if(allocated(wrk2d)) then
-       deallocate(wrk2d)
-    else
-       deallocate(wrk2d_in)
-    end if
-    if(dycore_is('LR')) call polar_average(loc_arr)
   end subroutine read_2d_trc
 
 !------------------------------------------------------------------------
 
   subroutine read_za_trc( fid, vid, loc_arr, strt, cnt, file, order )
     use interpolate_data, only : lininterp_init, lininterp, interp_type, lininterp_finish
-    use phys_grid,        only : pcols, begchunk, endchunk, get_ncols_p, get_rlat_all_p
+    use phys_grid,        only : get_ncols_p, get_rlat_all_p
 
     implicit none
     type(file_desc_t), intent(in) :: fid
@@ -1524,8 +1432,7 @@ contains
 
   subroutine read_3d_trc( fid, vid, loc_arr, strt, cnt, file, order)
     use interpolate_data, only : lininterp_init, lininterp, interp_type, lininterp_finish
-    use phys_grid,        only : pcols, begchunk, endchunk, get_ncols_p, get_rlat_all_p, get_rlon_all_p, get_lon_all_p,&
-                                 get_lat_all_p
+    use phys_grid,        only : get_ncols_p, get_rlat_all_p, get_rlon_all_p
     use mo_constants,     only : pi
     use dycore,           only : dycore_is
     use polar_avg,        only : polar_average
@@ -1540,85 +1447,7 @@ contains
 
     type (trfile), intent(in) :: file
 
-    integer :: astat, c, ncols
-    integer :: lons(pcols), lats(pcols)
-
-    integer :: ierr
-
-    real(r8), allocatable, target :: wrk3d(:,:,:)
-    real(r8), pointer :: wrk3d_in(:,:,:)
-    real(r8) :: to_lons(pcols), to_lats(pcols)
-    real(r8), parameter :: zero=0_r8, twopi=2_r8*pi
-    type(interp_type) :: lon_wgts, lat_wgts
-
-    loc_arr(:,:,:) = 0._r8
-    nullify(wrk3d_in)
-    allocate(wrk3d(cnt(1),cnt(2),cnt(3)), stat=ierr)
-    if( ierr /= 0 ) then
-       write(iulog,*) 'read_3d_trc: wrk3d allocation error = ',ierr
-       call endrun
-    end if
-
-    ierr = pio_get_var( fid, vid, strt, cnt, wrk3d )
-
-    if(order(1)/=1 .or. order(2)/=2 .or. order(3)/=3 .or. &
-         cnt(1)/=file%nlon.or.cnt(2)/=file%nlat.or.cnt(3)/=file%nlev) then
-       allocate(wrk3d_in(file%nlon,file%nlat,file%nlev),stat=ierr)
-       if( ierr /= 0 ) then
-          write(iulog,*) 'read_3d_trc: wrk3d allocation error = ',ierr
-          call endrun
-       end if
-       wrk3d_in = reshape( wrk3d(:,:,:),(/file%nlon,file%nlat,file%nlev/), order=order )
-       deallocate(wrk3d)
-    else
-       wrk3d_in => wrk3d
-    end if
-
-! If weighting by latitude, then perform horizontal interpolation by using weight_x, weight_y
-
-   if(file%weight_by_lat) then
-
-     call t_startf('xy_interp')
-
-     do c = begchunk,endchunk
-        ncols = get_ncols_p(c)
-        call get_lon_all_p(c,ncols,lons)
-        call get_lat_all_p(c,ncols,lats)
-
-        call xy_interp(file%nlon,file%nlat,file%nlev,plon,plat,pcols,ncols,file%weight_x,file%weight_y,wrk3d_in, &
-             loc_arr(:,:,c-begchunk+1), lons,lats,file%count_x,file%count_y,file%index_x,file%index_y)
-     enddo
-
-     call t_stopf('xy_interp')
-
-   else
-    do c=begchunk,endchunk
-       ncols = get_ncols_p(c)
-       call get_rlat_all_p(c, pcols, to_lats)
-       call get_rlon_all_p(c, pcols, to_lons)
-
-       call lininterp_init(file%lons, file%nlon, to_lons(1:ncols), ncols, 2, lon_wgts, zero, twopi)
-       call lininterp_init(file%lats, file%nlat, to_lats(1:ncols), ncols, 1, lat_wgts)
-
-
-       call lininterp(wrk3d_in, file%nlon, file%nlat, file%nlev, loc_arr(:,:,c-begchunk+1), ncols, pcols, lon_wgts, lat_wgts)
-
-
-       call lininterp_finish(lon_wgts)
-       call lininterp_finish(lat_wgts)
-    end do
-   endif
-
-    if(allocated(wrk3d)) then
-       deallocate( wrk3d, stat=astat )
-    else
-       deallocate( wrk3d_in, stat=astat )
-    end if
-    if( astat/= 0 ) then
-       write(iulog,*) 'read_3d_trc: failed to deallocate wrk3d array; error = ',astat
-       call endrun
-    endif
-    if(dycore_is('LR')) call polar_average(file%nlev, loc_arr)
+    call endrun('read_3d_trc: Not supported with weak scaling fix')
   end subroutine read_3d_trc
 
 !------------------------------------------------------------------------------

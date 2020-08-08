@@ -11,6 +11,7 @@ module phys_grid
    ! Physics grid management
    public :: phys_grid_init     ! initialize the physics grid
    public :: phys_grid_readnl   ! Read the phys_grid_nl namelist
+   public :: phys_grid_initialized
    ! Local task interfaces
    public :: get_dlat_p         ! latitude of a physics column in degrees
    public :: get_dlon_p         ! longitude of a physics column in degrees
@@ -19,6 +20,8 @@ module phys_grid
    public :: get_area_p         ! area of a physics column in radians squared
    public :: get_rlat_all_p     ! latitudes of physics cols in chunk (radians)
    public :: get_rlon_all_p     ! longitudes of physics cols in chunk (radians)
+   public :: get_area_all_p     ! areas of physics cols in chunk
+   public :: get_wght_all_p     ! weights of physics cols in chunk
    public :: get_ncols_p        ! number of columns in a chunk
    public :: get_gcol_p         ! global column index of a physics column
    public :: get_gcol_all_p     ! global col index of all phys cols in a chunk
@@ -59,6 +62,8 @@ module phys_grid
    integer,     private          :: endchunk = -1
    type(chunk), private, pointer :: chunks(:) => NULL() ! (begchunk:endchunk)
 
+   logical                       :: phys_grid_set = .false.
+
    ! Max number of double-precision fields on a task for global calculations
    ! A value of -1 signifies no limit.
    integer,     protected, public :: phys_global_max_fields = -1
@@ -84,7 +89,6 @@ module phys_grid
    integer,          protected, public :: index_bottom_layer = 0
    integer,          protected, public :: index_top_interface = 1
    integer,          protected, public :: index_bottom_interface = 0
-   logical,          protected, public :: phys_grid_initialized = .false.
 
 !==============================================================================
 CONTAINS
@@ -143,6 +147,8 @@ CONTAINS
       end if
 
    end subroutine phys_grid_readnl
+
+   !========================================================================
 
    subroutine phys_grid_init()
 !      use mpi,              only: MPI_reduce ! XXgoldyXX: Should this work?
@@ -356,7 +362,7 @@ CONTAINS
       end if
 
       ! Set flag indicating physics grid is now set
-      phys_grid_initialized = .true.
+      phys_grid_set = .true.
 
       call t_stopf("phys_grid_init")
       call t_adj_detailf(+2)
@@ -379,7 +385,7 @@ CONTAINS
       character(len=128)          :: errmsg
       character(len=*), parameter :: subname = 'chunk_info_to_index_p: '
 
-      if (.not. phys_grid_initialized) then
+      if (.not. phys_grid_initialized()) then
          if (present(subname_in)) then
             call endrun(trim(subname_in)//'physics grid not initialized')
          else
@@ -411,6 +417,13 @@ CONTAINS
 
    !========================================================================
 
+   logical function phys_grid_initialized()
+      ! Return .true. if the physics grid is initialized, otherwise .false.
+      phys_grid_initialized = phys_grid_set
+   end function phys_grid_initialized
+
+   !========================================================================
+
    real(r8) function get_dlat_p(index)
       use cam_logfile,    only: iulog
       use cam_abortutils, only: endrun
@@ -422,7 +435,7 @@ CONTAINS
       character(len=128)          :: errmsg
       character(len=*), parameter :: subname = 'get_dlat_p'
 
-      if (.not. phys_grid_initialized) then
+      if (.not. phys_grid_initialized()) then
          call endrun(subname//': physics grid not initialized')
       else if ((index < 1) .or. (index > columns_on_task)) then
          write(errmsg, '(a,2(a,i0))') subname, ': index (', index,            &
@@ -448,7 +461,7 @@ CONTAINS
       character(len=128)          :: errmsg
       character(len=*), parameter :: subname = 'get_dlon_p'
 
-      if (.not. phys_grid_initialized) then
+      if (.not. phys_grid_initialized()) then
          call endrun(subname//': physics grid not initialized')
       else if ((index < 1) .or. (index > columns_on_task)) then
          write(errmsg, '(a,2(a,i0))') subname, ': index (', index,            &
@@ -561,6 +574,62 @@ CONTAINS
 
    !========================================================================
 
+   subroutine get_area_all_p(lcid, areadim, areas)
+      use cam_abortutils, only: endrun
+      !-----------------------------------------------------------------------
+      !
+      ! get_area_all_p: Return all areas for chunk, <lcid>
+      !
+      !-----------------------------------------------------------------------
+      ! Dummy Arguments
+      integer,  intent(in)  :: lcid           ! local chunk id
+      integer,  intent(in)  :: areadim        ! declared size of output array
+      real(r8), intent(out) :: areas(areadim) ! array of latitudes
+
+      ! Local variables
+      integer               :: index          ! loop index
+      character(len=*), parameter :: subname = 'get_area_all_p: '
+
+      !-----------------------------------------------------------------------
+      if ((lcid < begchunk) .or. (lcid > endchunk)) then
+         call endrun(subname//'chunk index out of range')
+      end if
+      do index = chunks(lcid)%phys_col_start, chunks(lcid)%phys_col_end
+         areas(index) = phys_columns(index)%area
+      end do
+
+   end subroutine get_area_all_p
+
+   !========================================================================
+
+   subroutine get_wght_all_p(lcid, areadim, areas)
+      use cam_abortutils, only: endrun
+      !-----------------------------------------------------------------------
+      !
+      ! get_wght_all_p: Return all weights for chunk, <lcid>
+      !
+      !-----------------------------------------------------------------------
+      ! Dummy Arguments
+      integer,  intent(in)  :: lcid           ! local chunk id
+      integer,  intent(in)  :: areadim        ! declared size of output array
+      real(r8), intent(out) :: areas(areadim) ! array of latitudes
+
+      ! Local variables
+      integer               :: index          ! loop index
+      character(len=*), parameter :: subname = 'get_wght_all_p: '
+
+      !-----------------------------------------------------------------------
+      if ((lcid < begchunk) .or. (lcid > endchunk)) then
+         call endrun(subname//'chunk index out of range')
+      end if
+      do index = chunks(lcid)%phys_col_start, chunks(lcid)%phys_col_end
+         areas(index) = phys_columns(index)%weight
+      end do
+
+   end subroutine get_wght_all_p
+
+   !========================================================================
+
    integer function get_ncols_p(lcid)
       !-----------------------------------------------------------------------
       !
@@ -587,7 +656,7 @@ CONTAINS
       character(len=128)          :: errmsg
       character(len=*), parameter :: subname = 'get_area_p: '
 
-      if (.not. phys_grid_initialized) then
+      if (.not. phys_grid_initialized()) then
          call endrun(subname//': physics grid not initialized')
       else if ((index < 1) .or. (index > columns_on_task)) then
          write(errmsg, '(a,2(a,i0))') subname, 'index (', index,              &
@@ -615,7 +684,7 @@ CONTAINS
       character(len=128)          :: errmsg
       character(len=*), parameter :: subname = 'get_gcol_p: '
 
-      if (.not. phys_grid_initialized) then
+      if (.not. phys_grid_initialized()) then
          call endrun(subname//'physics grid not initialized')
       else if ((lcid < begchunk) .or. (lcid > endchunk)) then
          write(errmsg, '(a,3(a,i0))') subname, 'lcid (', lcid,                &
@@ -682,7 +751,7 @@ CONTAINS
       character(len=128)          :: errmsg
       character(len=*), parameter :: subname = 'get_dyn_col_p_index: '
 
-      if (.not. phys_grid_initialized) then
+      if (.not. phys_grid_initialized()) then
          call endrun(subname//'physics grid not initialized')
       else if ((index < 1) .or. (index > columns_on_task)) then
          write(errmsg, '(a,2(a,i0))') subname, 'index (', index,              &
@@ -721,7 +790,7 @@ CONTAINS
       character(len=128)          :: errmsg
       character(len=*), parameter :: subname = 'get_gcol_all_p: '
 
-      if (.not. phys_grid_initialized) then
+      if (.not. phys_grid_initialized()) then
          call endrun(subname//'physics grid not initialized')
       else if ((lcid < begchunk) .or. (lcid > endchunk)) then
          write(errmsg, '(a,3(a,i0))') subname, 'lcid (', lcid,                &
@@ -760,7 +829,7 @@ CONTAINS
       character(len=128)          :: errmsg
       character(len=*), parameter :: subname = 'get_chunk_info_p: '
 
-      if (.not. phys_grid_initialized) then
+      if (.not. phys_grid_initialized()) then
          call endrun(subname//': physics grid not initialized')
       else if ((index < 1) .or. (index > columns_on_task)) then
          write(errmsg, '(a,2(a,i0))') subname, 'index (', index,              &
@@ -784,7 +853,7 @@ CONTAINS
       integer, intent(out) :: hdim1_d_out
       integer, intent(out) :: hdim2_d_out
 
-      if (.not. phys_grid_initialized) then
+      if (.not. phys_grid_initialized()) then
          call endrun('get_grid_dims: physics grid not initialized')
       end if
       hdim1_d_out = hdim1_d
