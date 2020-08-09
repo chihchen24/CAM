@@ -73,15 +73,19 @@ subroutine phys_debug_readnl(nlfile)
       close(unitn)
       call freeunit(unitn)
       ! Check inputs
-      if (abs(phys_debug_lat) > 90.0_r8) then
-         write(iulog, *) subname, ': phys_debug_lat out of range [-90., 90.]'
-         call endrun(subname//': phys_debug_lat out of range [-90., 90.]')
+      if (phys_debug_lat /= uninit_r8) then
+         if (abs(phys_debug_lat) > 90.0_r8) then
+            write(iulog, *) subname, ': phys_debug_lat out of range [-90., 90.]'
+            call endrun(subname//': phys_debug_lat out of range [-90., 90.]')
+         end if
       else
          write(iulog, *) subname, ': phys_debug_lat = ', phys_debug_lat
       end if
-      if ((phys_debug_lon < 0.0_r8) .or. (phys_debug_lon > 360.0_r8)) then
-         write(iulog, *) subname, ': phys_debug_lon out of range [0., 360.]'
-         call endrun(subname//': phys_debug_lon out of range [0., 360.]')
+      if (phys_debug_lon /= uninit_r8) then
+         if ((phys_debug_lon < 0.0_r8) .or. (phys_debug_lon > 360.0_r8)) then
+            write(iulog, *) subname, ': phys_debug_lon out of range [0., 360.]'
+            call endrun(subname//': phys_debug_lon out of range [0., 360.]')
+         end if
       else
          write(iulog, *) subname, ': phys_debug_lon = ', phys_debug_lon
       end if

@@ -1,6 +1,7 @@
 module phys_grid
 
    use shr_kind_mod,        only: r8 => shr_kind_r8
+   use ppgrid,              only: begchunk, endchunk
    use physics_column_type, only: physics_column_t
    use perf_mod,            only: t_adj_detailf, t_startf, t_stopf
 
@@ -80,8 +81,6 @@ module phys_grid
    ! Physics decomposition information
    type(physics_column_t), pointer     :: phys_columns(:) => NULL()
 
-   integer,     private          :: begchunk = 0
-   integer,     private          :: endchunk = -1
    type(chunk), private, pointer :: chunks(:) => NULL() ! (begchunk:endchunk)
 
    logical                       :: phys_grid_set = .false.
@@ -172,6 +171,7 @@ CONTAINS
    subroutine phys_grid_init()
 !      use mpi,              only: MPI_reduce ! XXgoldyXX: Should this work?
       use mpi,              only: MPI_INTEGER, MPI_MIN
+      use cam_abortutils, only: endrun
       use spmd_utils,       only: npes, mpicom
       use ppgrid,           only: pcols
       use dyn_grid,         only: get_dyn_grid_info, physgrid_copy_attributes_d
@@ -237,12 +237,18 @@ CONTAINS
       phys_columns => dyn_columns
       if (columns_on_task > 0) then
          col_index = last_dyn_column - first_dyn_column + 1
+         if (columns_on_task /= col_index) then
+            call endrun('phys_grid_init: num columns mismatch!')
+         end if
          num_chunks = col_index / pcols
          if ((num_chunks * pcols) < col_index) then
             num_chunks = num_chunks + 1
          end if
          begchunk = 1
-         endchunk =begchunk + num_chunks - 1
+         endchunk = begchunk + num_chunks - 1
+      else
+         ! We do not support tasks with no physics columns
+         call endrun('phys_grid_init: No columns on task, use fewer tasks')
       end if
       allocate(chunks(begchunk:endchunk))
       col_index = first_dyn_column - 1
@@ -364,10 +370,10 @@ CONTAINS
          do col_index = 1, columns_on_task
             area_d(col_index) = phys_columns(col_index)%area
          end do
+         call cam_grid_attribute_register('physgrid', 'area',                 &
+              'physics column areas', 'ncol', area_d, map=grid_map(3,:))
+         nullify(area_d) ! Belongs to attribute now
       end if
-      call cam_grid_attribute_register('physgrid', 'area',                    &
-           'physics column areas', 'ncol', area_d, map=grid_map(3,:))
-      nullify(area_d) ! Belongs to attribute now
       ! Cleanup pointers (they belong to the grid now)
       nullify(grid_map)
       deallocate(latvals)
@@ -556,15 +562,17 @@ CONTAINS
       real(r8), intent(out) :: rlats(rlatdim) ! array of latitudes
 
       ! Local variables
-      integer               :: index          ! loop index
+      integer                     :: index ! loop index
+      integer                     :: phys_ind
       character(len=*), parameter :: subname = 'get_rlat_all_p: '
 
       !-----------------------------------------------------------------------
       if ((lcid < begchunk) .or. (lcid > endchunk)) then
          call endrun(subname//'chunk index out of range')
       end if
-      do index = chunks(lcid)%phys_col_start, chunks(lcid)%phys_col_end
-         rlats(index) = phys_columns(index)%lat_rad
+      do index = 1, MIN(get_ncols_p(lcid), rlatdim)
+         phys_ind = index + chunks(lcid)%phys_col_start - 1
+         rlats(index) = phys_columns(phys_ind)%lat_rad
       end do
 
    end subroutine get_rlat_all_p
@@ -584,15 +592,17 @@ CONTAINS
       real(r8), intent(out) :: rlons(rlondim) ! array of longitudes
 
       ! Local variables
-      integer               :: index          ! loop index
+      integer                     :: index ! loop index
+      integer                     :: phys_ind
       character(len=*), parameter :: subname = 'get_rlon_all_p: '
 
       !-----------------------------------------------------------------------
       if ((lcid < begchunk) .or. (lcid > endchunk)) then
          call endrun(subname//'chunk index out of range')
       end if
-      do index = chunks(lcid)%phys_col_start, chunks(lcid)%phys_col_end
-         rlons(index) = phys_columns(index)%lon_rad
+      do index = 1, MIN(get_ncols_p(lcid), rlondim)
+         phys_ind = index + chunks(lcid)%phys_col_start - 1
+         rlons(index) = phys_columns(phys_ind)%lon_rad
       end do
 
    end subroutine get_rlon_all_p
@@ -609,25 +619,27 @@ CONTAINS
       ! Dummy Arguments
       integer,  intent(in)  :: lcid           ! local chunk id
       integer,  intent(in)  :: areadim        ! declared size of output array
-      real(r8), intent(out) :: areas(areadim) ! array of latitudes
+      real(r8), intent(out) :: areas(areadim) ! array of areas
 
       ! Local variables
-      integer               :: index          ! loop index
+      integer                     :: index ! loop index
+      integer                     :: phys_ind
       character(len=*), parameter :: subname = 'get_area_all_p: '
 
       !-----------------------------------------------------------------------
       if ((lcid < begchunk) .or. (lcid > endchunk)) then
          call endrun(subname//'chunk index out of range')
       end if
-      do index = chunks(lcid)%phys_col_start, chunks(lcid)%phys_col_end
-         areas(index) = phys_columns(index)%area
+      do index = 1, MIN(get_ncols_p(lcid), areadim)
+         phys_ind = index + chunks(lcid)%phys_col_start - 1
+         areas(index) = phys_columns(phys_ind)%area
       end do
 
    end subroutine get_area_all_p
 
    !========================================================================
 
-   subroutine get_wght_all_p(lcid, areadim, areas)
+   subroutine get_wght_all_p(lcid, wghtdim, wghts)
       use cam_abortutils, only: endrun
       !-----------------------------------------------------------------------
       !
@@ -636,19 +648,21 @@ CONTAINS
       !-----------------------------------------------------------------------
       ! Dummy Arguments
       integer,  intent(in)  :: lcid           ! local chunk id
-      integer,  intent(in)  :: areadim        ! declared size of output array
-      real(r8), intent(out) :: areas(areadim) ! array of latitudes
+      integer,  intent(in)  :: wghtdim        ! declared size of output array
+      real(r8), intent(out) :: wghts(wghtdim) ! array of weights
 
       ! Local variables
-      integer               :: index          ! loop index
+      integer                     :: index ! loop index
+      integer                     :: phys_ind
       character(len=*), parameter :: subname = 'get_wght_all_p: '
 
       !-----------------------------------------------------------------------
       if ((lcid < begchunk) .or. (lcid > endchunk)) then
          call endrun(subname//'chunk index out of range')
       end if
-      do index = chunks(lcid)%phys_col_start, chunks(lcid)%phys_col_end
-         areas(index) = phys_columns(index)%weight
+      do index = 1, MIN(get_ncols_p(lcid), wghtdim)
+         phys_ind = index + chunks(lcid)%phys_col_start - 1
+         wghts(index) = phys_columns(phys_ind)%weight
       end do
 
    end subroutine get_wght_all_p
