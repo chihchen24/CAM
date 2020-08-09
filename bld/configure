@@ -2829,8 +2829,6 @@ sub write_filepath
     # It also has to come before utils (which is already near the end).
     if ($weak_scale_fix_opt) {
       print $fh "$camsrcdir/src/physics/weak_scaling\n";
-#      print $fh "$camsrcdir/src/physics/weak_scaling/chemistry/mozart\n";
-#      print $fh "$camsrcdir/src/physics/weak_scaling/chemistry/utils\n";
     }
 
     if ($carma ne 'none') {
@@ -2927,9 +2925,6 @@ sub write_filepath
     }
     print $fh "$camsrcdir/src/dynamics/$dyn\n";
     if($dyn eq 'se') {
-        if ($weak_scale_fix_opt) {
-            print $fh "$camsrcdir/src/physics/weak_scaling/se\n";
-        }
        print $fh "$camsrcdir/src/dynamics/se/dycore\n";
     }
     print $fh "$camsrcdir/src/dynamics/tests\n";
