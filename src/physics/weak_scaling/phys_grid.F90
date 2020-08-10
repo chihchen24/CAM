@@ -67,8 +67,7 @@ module phys_grid
    type, public :: chunk
       integer, private :: ncols          =  1  ! # of grid columns in this chunk
       integer, private :: chunk_index    = -1  ! Local index of this chunk
-      integer, private :: phys_col_start =  0  ! First physics column in chunk
-      integer, private :: phys_col_end   = -1  ! Last physics column in chunk
+      integer, private, allocatable :: phys_cols(:) ! phys column indices
    end type chunk
 
    !! PRIVATE DATA
@@ -182,7 +181,7 @@ CONTAINS
 
       ! Local variables
       integer                             :: index
-      integer                             :: col_index
+      integer                             :: col_index, last_col, phys_col
       integer                             :: num_chunks
       integer                             :: first_dyn_column, last_dyn_column
       type(physics_column_t), pointer     :: dyn_columns(:) ! Dyn decomp
@@ -252,13 +251,22 @@ CONTAINS
       end if
       allocate(chunks(begchunk:endchunk))
       col_index = first_dyn_column - 1
+      ! Simple chunk assignment
       do index = begchunk, endchunk
          chunks(index)%ncols = MIN(pcols, (last_dyn_column - col_index))
-         col_index = col_index + 1
+         last_col = col_index + chunks(index)%ncols
          chunks(index)%chunk_index = index
-         chunks(index)%phys_col_start =  col_index
-         col_index = col_index + chunks(index)%ncols - 1
-         chunks(index)%phys_col_end = col_index
+         allocate(chunks(index)%phys_cols(chunks(index)%ncols))
+         do phys_col = 1, chunks(index)%ncols
+            if (col_index >= last_col) then
+               call endrun('phys_grid_init (internal): out of columns in chunk')
+            else
+               col_index = col_index + 1
+            end if
+            phys_columns(col_index)%local_phys_chunk = index
+            phys_columns(col_index)%phys_chunk_index = phys_col
+            chunks(index)%phys_cols(phys_col) = col_index
+         end do
       end do
 
       ! Now that we are done settine up the physics decomposition, clean up
@@ -293,8 +301,11 @@ CONTAINS
          if (lonvals(col_index) < lonmin) then
             lonmin = lonvals(col_index)
          end if
-         grid_map(1, col_index) = col_index
-         grid_map(2, col_index) = 0 ! No chunking in physics anymore
+         grid_map(2, col_index) = int(phys_columns(col_index)%local_phys_chunk,&
+              iMap)
+         grid_map(1, col_index) = int(phys_columns(col_index)%phys_chunk_index,&
+              iMap)
+
          if (unstructured) then
             grid_map(3, col_index) = phys_columns(col_index)%global_col_num
          else
@@ -349,9 +360,8 @@ CONTAINS
             deallocate(coord_map)
          end if
       end if
-      call cam_grid_register('physgrid', phys_decomp,                         &
-           lat_coord, lon_coord, grid_map, src_in=(/ 1, 0 /),                 &
-           unstruct=unstructured, block_indexed=.false.)
+      call cam_grid_register('physgrid', phys_decomp, lat_coord, lon_coord,   &
+           grid_map, unstruct=unstructured, block_indexed=.false.)
       ! Copy required attributes from the dynamics array
       nullify(copy_attributes)
       call physgrid_copy_attributes_d(copy_gridname, copy_attributes)
@@ -437,7 +447,7 @@ CONTAINS
          write(iulog, *) trim(errmsg)
          call endrun(trim(errmsg))
       end if
-      chunk_info_to_index_p = chunks(lcid)%phys_col_start + col - 1
+      chunk_info_to_index_p = chunks(lcid)%phys_cols(col)
    end function chunk_info_to_index_p
 
    !========================================================================
@@ -571,7 +581,7 @@ CONTAINS
          call endrun(subname//'chunk index out of range')
       end if
       do index = 1, MIN(get_ncols_p(lcid), rlatdim)
-         phys_ind = index + chunks(lcid)%phys_col_start - 1
+         phys_ind = chunks(lcid)%phys_cols(index)
          rlats(index) = phys_columns(phys_ind)%lat_rad
       end do
 
@@ -601,7 +611,7 @@ CONTAINS
          call endrun(subname//'chunk index out of range')
       end if
       do index = 1, MIN(get_ncols_p(lcid), rlondim)
-         phys_ind = index + chunks(lcid)%phys_col_start - 1
+         phys_ind = chunks(lcid)%phys_cols(index)
          rlons(index) = phys_columns(phys_ind)%lon_rad
       end do
 
@@ -631,7 +641,7 @@ CONTAINS
          call endrun(subname//'chunk index out of range')
       end if
       do index = 1, MIN(get_ncols_p(lcid), areadim)
-         phys_ind = index + chunks(lcid)%phys_col_start - 1
+         phys_ind = chunks(lcid)%phys_cols(index)
          areas(index) = phys_columns(phys_ind)%area
       end do
 
@@ -661,7 +671,7 @@ CONTAINS
          call endrun(subname//'chunk index out of range')
       end if
       do index = 1, MIN(get_ncols_p(lcid), wghtdim)
-         phys_ind = index + chunks(lcid)%phys_col_start - 1
+         phys_ind = chunks(lcid)%phys_cols(index)
          wghts(index) = phys_columns(phys_ind)%weight
       end do
 
@@ -736,7 +746,7 @@ CONTAINS
          write(iulog, *) trim(errmsg)
          call endrun(trim(errmsg))
       else
-         index = chunks(lcid)%phys_col_start + col - 1
+         index = chunks(lcid)%phys_cols(col)
          get_gcol_p = phys_columns(index)%global_col_num
       end if
 
@@ -824,7 +834,6 @@ CONTAINS
       integer, intent(in)  :: gdim          ! gcols dimension
       integer, intent(out) :: gcols(:)      ! global column indices
       ! Local variables
-      integer                     :: col_start
       integer                     :: ncol, col_ind
       character(len=128)          :: errmsg
       character(len=*), parameter :: subname = 'get_gcol_all_p: '
@@ -837,7 +846,6 @@ CONTAINS
          write(iulog, *) trim(errmsg)
          call endrun(trim(errmsg))
       else
-         col_start = chunks(lcid)%phys_col_start
          ncol = chunks(lcid)%ncols
          if (gdim < ncol) then
             if (masterproc) then
@@ -847,7 +855,7 @@ CONTAINS
             gcols(gdim+1:ncol) = -1
          end if
          do col_ind = 1, MIN(ncol, gdim)
-            gcols(col_ind) = phys_columns(col_start+col_ind-1)%global_col_num
+            gcols(col_ind) = get_gcol_p(lcid, col_ind)
          end do
       end if
 
@@ -876,7 +884,7 @@ CONTAINS
          write(iulog, *) errmsg
          call endrun(errmsg)
       else
-         lchnk = phys_columns(index)%phys_chunk_index
+         lchnk = phys_columns(index)%local_phys_chunk
          icol = phys_columns(index)%phys_chunk_index
       end if
 
@@ -1049,11 +1057,10 @@ CONTAINS
       weighted_sum = 0.0_r8
       do lchnk = begchunk, endchunk
          ncol = get_ncols_p(lchnk)
-         phys_col = chunks(lchnk)%phys_col_start
          do col_ind = 1, ncol
+            phys_col = chunks(lchnk)%phys_cols(col_ind)
             weight = phys_columns(phys_col)%weight
             weighted_sum = weighted_sum + (src_field(col_ind, lchnk) * weight)
-            phys_col = phys_col + 1
          end do
       end do
    end subroutine weighted_sum_p
@@ -1089,14 +1096,13 @@ CONTAINS
       end if
       do lchnk = begchunk, endchunk
          ncol = get_ncols_p(lchnk)
-         phys_col = chunks(lchnk)%phys_col_start
          do col_ind = 1, ncol
+            phys_col = chunks(lchnk)%phys_cols(col_ind)
             weight = phys_columns(phys_col)%weight
             do fld = 1, num_fields
                src = src_field(col_ind, lchnk - begchunk + 1, fld)
                weighted_field(fld, phys_col) =  src * weight
             end do
-            phys_col = phys_col + 1
          end do
       end do
    end subroutine weighted_field_p

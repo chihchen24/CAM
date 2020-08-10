@@ -275,12 +275,11 @@ CONTAINS
       !
       !-----------------------------------------------------------------------
       !
-      if (.not. initialized) then
-         call endrun(subname//'gmean not initialized')
-      end if
-
       arr_gmean = 0.0_r8
       if (use_repro_sum) then
+         if (.not. initialized) then
+            call endrun(subname//'gmean not initialized')
+         end if
          ! Perform reproducible sum. Note, this depends on the value
          ! of global_max_fields not changing between runs
          allocate(send_cnts(npes))

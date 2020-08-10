@@ -285,6 +285,14 @@ CONTAINS
             cam_out=cam_out, &
             cam_in=cam_in)
 
+       call get_horiz_grid_dim_d(hdim1_d, hdim2_d)
+       ! Adjust number of columns depending on type of physics grid
+       !!XXG: Weak scaling work around (remove once move to WS is complete)
+       pgcols = ngcols_phys
+       if (pgcols < 0) then
+          pgcols = hdim1_d * hdim2_d
+       end if
+
        !
        ! Initialize MCT gsMap, domain and attribute vectors (and dof)
        !
@@ -313,15 +321,8 @@ CONTAINS
        ! Set flag to specify that an extra albedo calculation is to be done (i.e. specify active)
        !
        call seq_infodata_PutData(infodata, atm_prognostic=.true.)
-       call get_horiz_grid_dim_d(hdim1_d, hdim2_d)
        call seq_infodata_PutData(infodata, atm_nx=hdim1_d, atm_ny=hdim2_d)
 
-       ! Adjust number of columns depending on type of physics grid
-       !!XXG: Weak scaling work around (remove once move to WS is complete)
-       pgcols = ngcols_phys
-       if (pgcols < 0) then
-          pgcols = hdim1_d * hdim2_d
-       end if
 
        ! Set flag to indicate that CAM will provide carbon and dust deposition fluxes.
        ! This is now hardcoded to .true. since the ability of CICE to read these
