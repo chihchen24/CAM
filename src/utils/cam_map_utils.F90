@@ -825,7 +825,7 @@ contains
                     end if
                   end do
                   if (tind > mapSize) then
-                    write(errmsg, '(2(a,i0),a,5(i0,", "),")")')               &
+                    write(errmsg, '(2(a,i0),a,12x,5(i0,", "),")")')           &
                          'internal error, tind (', tind, ') > mapSize (',     &
                          mapSize, '), srclens = (', srclens(1:5)
                     call endrun(subname//trim(errmsg))

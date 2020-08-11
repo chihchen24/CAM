@@ -178,10 +178,15 @@ CONTAINS
       use cam_grid_support, only: iMap, hclen => max_hcoordname_len
       use cam_grid_support, only: horiz_coord_t, horiz_coord_create
       use cam_grid_support, only: cam_grid_attribute_copy, cam_grid_attr_exists
+!!XXgoldyXX: v debug only
+use mpi,only: MPI_SUM
+use spmd_utils, only: iam
+!!XXgoldyXX: ^ debug only
 
       ! Local variables
       integer                             :: index
       integer                             :: col_index, last_col, phys_col
+      integer                             :: ichnk, icol, ncol, gcol
       integer                             :: num_chunks
       integer                             :: first_dyn_column, last_dyn_column
       type(physics_column_t), pointer     :: dyn_columns(:) ! Dyn decomp
@@ -282,38 +287,58 @@ CONTAINS
       ! It's structure will depend on whether or not the physics grid is
       ! unstructured
       if (unstructured) then
-         allocate(grid_map(3, columns_on_task))
+         allocate(grid_map(3, pcols * (endchunk - begchunk + 1)))
       else
-         allocate(grid_map(4, columns_on_task))
+         allocate(grid_map(4, pcols * (endchunk - begchunk + 1)))
       end if
-      grid_map = 0
+      grid_map = 0_iMap
       allocate(latvals(size(grid_map, 2)))
       allocate(lonvals(size(grid_map, 2)))
 
       lonmin = 1000.0_r8 ! Out of longitude range
       latmin = 1000.0_r8 ! Out of latitude range
-      do col_index = 1, columns_on_task
-         latvals(col_index) = phys_columns(col_index)%lat_deg
-         if (latvals(col_index) < latmin) then
-            latmin = latvals(col_index)
-         end if
-         lonvals(col_index) = phys_columns(col_index)%lon_deg
-         if (lonvals(col_index) < lonmin) then
-            lonmin = lonvals(col_index)
-         end if
-         grid_map(2, col_index) = int(phys_columns(col_index)%local_phys_chunk,&
-              iMap)
-         grid_map(1, col_index) = int(phys_columns(col_index)%phys_chunk_index,&
-              iMap)
-
-         if (unstructured) then
-            grid_map(3, col_index) = phys_columns(col_index)%global_col_num
-         else
-            ! lon
-            grid_map(3, col_index) = phys_columns(col_index)%coord_indices(1)
-            ! lat
-            grid_map(4, col_index) = phys_columns(col_index)%coord_indices(2)
-         end if
+      index = 0
+      do ichnk = begchunk, endchunk
+         ncol = get_ncols_p(ichnk)
+         do icol = 1, pcols
+            index = index + 1
+            if (icol <= ncol) then
+               col_index = chunks(ichnk)%phys_cols(icol)
+               latvals(index) = phys_columns(col_index)%lat_deg
+               if (latvals(index) < latmin) then
+                  latmin = latvals(index)
+               end if
+               lonvals(index) = phys_columns(col_index)%lon_deg
+               if (lonvals(index) < lonmin) then
+                  lonmin = lonvals(index)
+               end if
+            else
+               col_index = -1
+               latvals(index) = 1000.0_r8
+               lonvals(index) = 1000.0_r8
+            end if
+            grid_map(1, index) = int(icol, iMap)
+            grid_map(2, index) = int(ichnk, iMap)
+            if (icol <= ncol) then
+               if (unstructured) then
+                  gcol = phys_columns(col_index)%global_col_num
+                  if (gcol > 0) then
+                     grid_map(3, index) = int(gcol, iMap)
+                  end if ! else entry remains 0
+               else
+                  ! lon
+                  gcol = phys_columns(col_index)%coord_indices(1)
+                  if (gcol > 0) then
+                     grid_map(3, index) = int(gcol, iMap)
+                  end if ! else entry remains 0
+                  ! lat
+                  gcol = phys_columns(col_index)%coord_indices(2)
+                  if (gcol > 0) then
+                     grid_map(4, index) = gcol
+                  end if ! else entry remains 0
+               end if
+            end if ! Else entry remains 0
+         end do
       end do
 
       ! Note that if the dycore is using the same points as the physics grid,
@@ -1106,6 +1131,50 @@ CONTAINS
          end do
       end do
    end subroutine weighted_field_p
+
+   subroutine dump_grid_map(grid_map)
+      use spmd_utils,     only: iam, npes, mpicom
+      use cam_abortutils, only: endrun
+      use cam_logfile,    only: iulog
+
+      integer(iMap), pointer :: grid_map(:,:)
+
+      integer                :: num_cols
+      integer                :: penum, icol
+      logical                :: unstruct
+      integer                :: file
+      integer                :: ierr
+
+      unstruct = SIZE(grid_map, 1) == 3
+      num_cols = SIZE(grid_map, 2)
+      if (iam == 0) then
+         open(newunit=file, file='physgrid_map.csv', status='replace')
+         if (unstruct) then
+            write(file, *) '"iam","col","block","map pos"'
+         else
+            write(file, *) '"iam","col","block","lon","lat"'
+         end if
+         close(unit=file)
+      end if
+      do penum = 0, npes - 1
+         if (iam == penum) then
+            open(newunit=file, file='physgrid_map.csv', status='old',         &
+                 action='readwrite', position='append')
+            do icol = 1, num_cols
+               if (unstruct) then
+                  write(file, '(3(i0,","),i0)') iam, int(grid_map(1,icol)),   &
+                       int(grid_map(2,icol)), int(grid_map(3,icol))
+               else
+                  write(file, '(4(i0,","),i0)') iam, int(grid_map(1,icol)),   &
+                       int(grid_map(2,icol)), int(grid_map(3,icol)),          &
+                       int(grid_map(4,icol))
+               end if
+            end do
+            close(unit=file)
+         end if
+         call MPI_barrier(mpicom, ierr)
+      end do
+   end subroutine dump_grid_map
 
 !=============================================================================
 !==
