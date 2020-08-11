@@ -178,10 +178,6 @@ CONTAINS
       use cam_grid_support, only: iMap, hclen => max_hcoordname_len
       use cam_grid_support, only: horiz_coord_t, horiz_coord_create
       use cam_grid_support, only: cam_grid_attribute_copy, cam_grid_attr_exists
-!!XXgoldyXX: v debug only
-use mpi,only: MPI_SUM
-use spmd_utils, only: iam
-!!XXgoldyXX: ^ debug only
 
       ! Local variables
       integer                             :: index
@@ -1133,9 +1129,10 @@ use spmd_utils, only: iam
    end subroutine weighted_field_p
 
    subroutine dump_grid_map(grid_map)
-      use spmd_utils,     only: iam, npes, mpicom
-      use cam_abortutils, only: endrun
-      use cam_logfile,    only: iulog
+      use spmd_utils,       only: iam, npes, mpicom
+      use cam_abortutils,   only: endrun
+      use cam_logfile,      only: iulog
+      use cam_grid_support, only: iMap
 
       integer(iMap), pointer :: grid_map(:,:)
 
