@@ -169,9 +169,11 @@ CONTAINS
 
    subroutine phys_grid_init()
 !      use mpi,              only: MPI_reduce ! XXgoldyXX: Should this work?
-      use mpi,              only: MPI_INTEGER, MPI_MIN
-      use cam_abortutils, only: endrun
-      use spmd_utils,       only: npes, mpicom
+      use mpi,              only: MPI_INTEGER, MPI_REAL8, MPI_MIN, MPI_MAX
+      use shr_mem_mod,      only: shr_mem_getusage
+      use cam_abortutils,   only: endrun
+      use cam_logfile,      only: iulog
+      use spmd_utils,       only: npes, mpicom, masterprocid, masterproc
       use ppgrid,           only: pcols
       use dyn_grid,         only: get_dyn_grid_info, physgrid_copy_attributes_d
       use cam_grid_support, only: cam_grid_register, cam_grid_attribute_register
@@ -195,6 +197,8 @@ CONTAINS
       type(horiz_coord_t),    pointer     :: lat_coord
       type(horiz_coord_t),    pointer     :: lon_coord
       real(r8),               pointer     :: area_d(:)
+      real(r8)                            :: mem_hw_beg, mem_hw_end
+      real(r8)                            :: mem_beg, mem_end
       logical                             :: unstructured
       real(r8)                            :: temp ! For MPI
       integer                             :: ierr ! For MPI
@@ -209,6 +213,8 @@ CONTAINS
       nullify(lon_coord)
       nullify(area_d)
       nullify(copy_attributes)
+
+      call shr_mem_getusage(mem_hw_beg, mem_beg)
 
       call t_adj_detailf(-2)
       call t_startf("phys_grid_init")
@@ -422,6 +428,22 @@ CONTAINS
 
       call t_stopf("phys_grid_init")
       call t_adj_detailf(+2)
+
+      call shr_mem_getusage(mem_hw_end, mem_end)
+      temp = mem_end - mem_beg
+      call MPI_reduce(temp, mem_end, 1, MPI_REAL8, MPI_MAX, masterprocid,     &
+           mpicom, ierr)
+      if (masterproc) then
+         write(iulog, *) 'phys_grid_init: Increase in memory usage = ',       &
+              mem_end, ' (MB)'
+      end if
+      temp = mem_hw_end - mem_hw_beg
+      call MPI_reduce(temp, mem_hw_end, 1, MPI_REAL8, MPI_MAX, masterprocid,  &
+           mpicom, ierr)
+      if (masterproc) then
+         write(iulog, *) 'phys_grid_init: Increase in memory highwater = ',   &
+              mem_end, ' (MB)'
+      end if
 
    end subroutine phys_grid_init
 

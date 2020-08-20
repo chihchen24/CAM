@@ -76,6 +76,7 @@ CONTAINS
     !
     !-----------------------------------------------------------------------
     !
+    call t_startf('gmean_arr')
     call t_startf ('gmean_fixed_repro')
     call gmean_fixed_repro(arr, arr_gmean, rel_diff, nflds)
     call t_stopf ('gmean_fixed_repro')
@@ -95,6 +96,7 @@ CONTAINS
           enddo
        endif
     endif
+    call t_stopf('gmean_arr')
 
     return
   end subroutine gmean_arr

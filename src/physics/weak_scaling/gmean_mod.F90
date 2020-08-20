@@ -275,6 +275,7 @@ CONTAINS
       !
       !-----------------------------------------------------------------------
       !
+      call t_startf('gmean_arr')
       arr_gmean = 0.0_r8
       if (use_repro_sum) then
          if (.not. initialized) then
@@ -330,6 +331,7 @@ CONTAINS
          call MPI_allreduce(wsum, arr_gmean, nflds, MPI_REAL8, MPI_SUM,       &
               mpicom, ierr)
       end if
+      call t_stopf('gmean_arr')
    end subroutine gmean_arr
 
    !
